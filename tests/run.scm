@@ -1,0 +1,3 @@
+;; Test runner entry point suitable for CI: steel tests/run.scm.
+(require "core-test.scm")
+(require "integration-test.scm")
