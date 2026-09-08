@@ -21,10 +21,24 @@
              (groot-entry-name-uses-theme-accent? (groot-entry "/r/src" "src" 'directory)) #t)
 (check-equal "directory icons use the theme accent instead of the glyph palette"
              (groot-entry-icon-uses-glyph-color? (groot-entry "/r/src" "src" 'directory)) #f)
-(check-equal "rows expose named entry and depth fields"
-             (let ([row (groot-row (car entries) 2)])
-               (list (GrootRow? row) (groot-entry-name (groot-row-entry row)) (groot-row-depth row)))
-             '(#t "z" 2))
+(check-equal "rows expose named entry, depth, and tree-prefix fields"
+             (let ([row (groot-row (car entries) 2 "├╴")])
+               (list (GrootRow? row) (groot-entry-name (groot-row-entry row)) (groot-row-depth row) (groot-row-prefix row)))
+             '(#t "z" 2 "├╴"))
+
+(check-equal "ancestor chains keep the last directories, outermost first"
+             (list (groot-ancestor-chain "/repo" "/repo/a/b/c" "/" 2)
+                   (groot-ancestor-chain "/repo" "/repo/src" "/" 2)
+                   (groot-ancestor-chain "/repo" "/repo" "/" 2)
+                   (groot-ancestor-chain "/repo" "/repo/a/b/c" "/" 1))
+             '(("/repo/a/b" "/repo/a/b/c") ("/repo/src") ("/repo") ("/repo/a/b/c")))
+
+(check-equal "input truncation keeps the tail rather than the head"
+             (list (groot-truncate-start "abcdefgh" 4)
+                   (groot-truncate-start "abc" 8)
+                   (groot-truncate-start "abcdefgh" 1)
+                   (groot-truncate-start "abc" 0))
+             '("…fgh" "abc" "…" ""))
 
 ;; Typed mutable session state replaces symbol-keyed hash storage.
 (define state (groot-state "/repo" "abc"))

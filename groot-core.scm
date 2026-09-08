@@ -23,6 +23,7 @@
          groot-row
          groot-row-entry
          groot-row-depth
+         groot-row-prefix
          groot-state
          groot-state-ref
          groot-state-set!
@@ -30,6 +31,7 @@
          groot-path-inside?
          groot-parent-path
          groot-ancestor-paths
+         groot-ancestor-chain
          groot-clamp-position
          groot-window-after-move
          groot-scroll-position
@@ -39,20 +41,21 @@
          groot-jump-prefix-valid?
          groot-navigation-delta
          groot-truncate
+         groot-truncate-start
          groot-filter-prefix-candidates)
 
 ;; Named filesystem entry used across the core, filesystem, and UI layers.
 (struct GrootEntry (path name kind) #:transparent)
 
-;; Named rendered row containing an entry and its tree depth.
-(struct GrootRow (entry depth) #:transparent)
+;; Named rendered row containing an entry, its tree depth, and its drawn tree prefix.
+(struct GrootRow (entry depth prefix) #:transparent)
 
 ;; Mutable filesystem and flattened-tree state.
 (struct GrootTreeState (root children expanded files search-ready rows)
   #:mutable #:transparent)
 
 ;; Mutable search query, match, and search-mode state.
-(struct GrootSearchState (query results result-rows input)
+(struct GrootSearchState (query results result-count result-rows input)
   #:mutable #:transparent)
 
 ;; Mutable keyboard, jump-label, cursor, and viewport state.
@@ -88,8 +91,8 @@
 ;; Reports whether an entry icon should retain its glyph palette color.
 (define (groot-entry-icon-uses-glyph-color? entry) (not (groot-directory? entry)))
 
-;; Creates a named rendered tree row.
-(define (groot-row entry depth) (GrootRow entry depth))
+;; Creates a named rendered tree row; prefix holds the drawn branch guides.
+(define (groot-row entry depth prefix) (GrootRow entry depth prefix))
 
 ;; Returns a rendered row's filesystem entry.
 (define (groot-row-entry row) (GrootRow-entry row))
@@ -97,11 +100,14 @@
 ;; Returns a rendered row's indentation depth.
 (define (groot-row-depth row) (GrootRow-depth row))
 
+;; Returns a rendered row's tree-guide prefix string.
+(define (groot-row-prefix row) (GrootRow-prefix row))
+
 ;; Creates a fresh typed session state rooted at root.
 (define (groot-state root default-jump-alphabet)
   (GrootState
     (GrootTreeState root (hash) (hash-insert (hash) root #f) '() #f #())
-    (GrootSearchState "" '() #() #f)
+    (GrootSearchState "" '() 0 #() #f)
     (GrootNavigationState #f #f #f "" default-jump-alphabet 0 0 20 3)
     (GrootLifecycleState #t #t #f)))
 
@@ -116,6 +122,7 @@
         [(equal? key 'rows) (GrootTreeState-rows (GrootState-tree state))]
         [(equal? key 'query) (GrootSearchState-query (GrootState-search state))]
         [(equal? key 'results) (GrootSearchState-results (GrootState-search state))]
+        [(equal? key 'result-count) (GrootSearchState-result-count (GrootState-search state))]
         [(equal? key 'result-rows) (GrootSearchState-result-rows (GrootState-search state))]
         [(equal? key 'search-input?) (GrootSearchState-input (GrootState-search state))]
         [(equal? key 'pending-g?) (GrootNavigationState-pending-g (GrootState-navigation state))]
@@ -142,6 +149,7 @@
         [(equal? key 'rows) (set-GrootTreeState-rows! (GrootState-tree state) value)]
         [(equal? key 'query) (set-GrootSearchState-query! (GrootState-search state) value)]
         [(equal? key 'results) (set-GrootSearchState-results! (GrootState-search state) value)]
+        [(equal? key 'result-count) (set-GrootSearchState-result-count! (GrootState-search state) value)]
         [(equal? key 'result-rows) (set-GrootSearchState-result-rows! (GrootState-search state) value)]
         [(equal? key 'search-input?) (set-GrootSearchState-input! (GrootState-search state) value)]
         [(equal? key 'pending-g?) (set-GrootNavigationState-pending-g! (GrootState-navigation state) value)]
@@ -193,6 +201,16 @@
         (cond [(equal? current root) (cons root acc)]
               [(equal? current path) '()]
               [else (loop (groot-parent-path current separator) (cons current acc))]))))
+
+;; Returns the last count ancestors of path, outermost first, never above root.
+;; Search headers use this so a deep parent reads as its own final directories
+;; instead of as the whole route from the workspace root.
+(define (groot-ancestor-chain root path separator count)
+  (let loop ([current path] [remaining count] [acc '()])
+    (cond [(equal? current root) (if (null? acc) (list root) acc)]
+          [(not (groot-path-inside? root current separator)) (if (null? acc) (list root) acc)]
+          [(<= remaining 0) acc]
+          [else (loop (groot-parent-path current separator) (- remaining 1) (cons current acc))])))
 
 ;; Clamps cursor and window start for count rows and a viewport of height rows.
 (define (groot-clamp-position cursor window-start count height)
@@ -268,6 +286,15 @@
         [(<= (string-length text) width) text]
         [(= width 1) "…"]
         [else (string-append (substring text 0 (- width 1)) "…")]))
+
+;; Truncates text from the front, keeping the tail visible. An input grows at
+;; its end, so the newest characters are the ones that must stay on screen.
+(define (groot-truncate-start text width)
+  (define length (string-length text))
+  (cond [(<= width 0) ""]
+        [(<= length width) text]
+        [(= width 1) "…"]
+        [else (string-append "…" (substring text (- length (- width 1)) length))]))
 
 ;; Narrows a candidate list after a query grows; callers keep ranking in their matcher.
 (define (groot-filter-prefix-candidates previous-query query all-files previous-results)

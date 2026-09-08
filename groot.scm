@@ -19,7 +19,21 @@
 ;; Sidebar placement; valid values are 'left and 'right.
 (define *groot-side* 'left)
 ;; Directory names excluded from both the tree and the deferred search index.
-(define *groot-ignored-names* (hashset ".git" ".hg" ".direnv" "node_modules" "target" "__pycache__"))
+;; Result rows built per keystroke. Ranked matches past this point are
+;; unreachable by scrolling long before they are worth the cost of building.
+(define *groot-max-results* 200)
+(define *groot-ignored-names* '(".git" ".hg" ".direnv" "node_modules" "target" "__pycache__"))
+;; Set form used for per-entry lookups while the list form is passed to the finder.
+(define *groot-ignored-set* (apply hashset *groot-ignored-names*))
+;; First row of the results list, below the three-row input frame.
+(define *groot-list-top* 3)
+;; Title centred on the input frame's top border.
+(define *groot-input-title* "Explore")
+;; Prompt glyph and caret for the search input, mirroring a picker input line.
+(define *groot-search-icon* "")
+(define *groot-search-caret* "▌")
+;; Icon shown for an expanded directory; glyph.hx only ships closed-folder variants.
+(define *groot-open-dir-icon* "󰝰")
 ;; Current named explorer state, or false before the first session opens.
 (define *groot-state* #f)
 ;; Prevents duplicate global hook registration.
@@ -91,7 +105,7 @@
     (groot-put! 'children (hash-insert children path (groot-fs-read-directory path)))))
 
 ;; Reports whether an entry name is excluded by the explorer's fixed safe defaults.
-(define (groot-ignored? entry) (hashset-contains? *groot-ignored-names* (groot-entry-name entry)))
+(define (groot-ignored? entry) (hashset-contains? *groot-ignored-set* (groot-entry-name entry)))
 
 ;; Returns cached children for path, loading them lazily when first expanded.
 (define (groot-children path)
@@ -103,17 +117,26 @@
 ;; Recursively materializes only expanded cached directories into display rows.
 (define (groot-visible-tree)
   (define expanded (groot-get 'expanded (hash)))
-  (define (walk entry depth acc)
-    (define next (cons (groot-row entry depth) acc))
+  ;; prefix carries the ancestor guides; last? picks this row's elbow.
+  (define (walk entry depth prefix last? acc)
+    (define next
+      (cons (groot-row entry depth
+                       (if (= depth 0) "" (string-append prefix (if last? "└╴" "├╴"))))
+            acc))
     (if (and (groot-directory? entry)
              (not (if (hash-contains? expanded (groot-entry-path entry))
                       (hash-try-get expanded (groot-entry-path entry))
                       #t)))
-        (let loop ([items (groot-children (groot-entry-path entry))] [rows next])
-          (if (null? items) rows (loop (cdr items) (walk (car items) (+ depth 1) rows))))
+        (let ([child-prefix
+               (if (= depth 0) "" (string-append prefix (if last? "  " "│ ")))])
+          (let loop ([items (groot-children (groot-entry-path entry))] [rows next])
+            (if (null? items)
+                rows
+                (loop (cdr items)
+                      (walk (car items) (+ depth 1) child-prefix (null? (cdr items)) rows)))))
         next))
   (define root-entry (groot-entry (groot-root) (file-name (groot-root)) 'directory))
-  (reverse (walk root-entry 0 '())))
+  (reverse (walk root-entry 0 "" #t '())))
 
 ;; Rebuilds the vector rendered by the tree only after a cache or fold transition.
 (define (groot-rebuild-tree!) (groot-put! 'rows (list->vector (groot-visible-tree))))
@@ -178,20 +201,87 @@
   (unless (hashset-contains? *groot-view-teardown-commands* (groot-command-name command))
     (groot-sync-current-file!)))
 
-;; Creates the complete file index on demand for search, skipping symlink recursion.
+;; Walks the tree in process, skipping symlink recursion. Correct but single
+;; threaded, so it also caches every directory it visits; only used as a fallback.
+(define (groot-walk-files root)
+  (define files '())
+  (define (walk directory)
+    (for-each (lambda (entry)
+                (cond [(groot-directory? entry) (walk (groot-entry-path entry))]
+                      [(equal? (groot-entry-kind entry) 'file)
+                       (set! files (cons (groot-entry-path entry) files))]))
+              (groot-children directory)))
+  (walk root)
+  files)
+
+;; Creates the complete file index on demand for search.
+;; An external finder does the traversal when one exists; it is orders of
+;; magnitude faster than walking a large tree from Steel and caches nothing.
 (define (groot-build-search-index!)
   (unless (groot-get 'search-ready? #f)
     (define root (groot-root))
-    (define files '())
-    (define (walk directory)
-      (for-each (lambda (entry)
-                  (cond [(groot-directory? entry) (walk (groot-entry-path entry))]
-                        [(equal? (groot-entry-kind entry) 'file)
-                         (set! files (cons (groot-entry-path entry) files))]))
-                (groot-children directory)))
-    (walk root)
-    (groot-put! 'files (sort files string<?))
+    (define found (groot-fs-find-files root *groot-ignored-names*))
+    (groot-put! 'files (sort (or found (groot-walk-files root)) string<?))
     (groot-put! 'search-ready? #t)))
+;; Directory levels drawn above a group's files. Two keeps a deep match
+;; identifiable without indenting the whole route from the workspace root.
+(define *groot-header-depth* 2)
+
+;; Emits the header rows for one parent. Every link in the chain is an only
+;; child, so each nests under the previous one. Returns the rows, the guide
+;; continuation the group's files sit under, and their depth.
+(define (groot-header-rows chain)
+  (let loop ([links chain] [depth 0] [continuation ""] [acc '()])
+    (if (null? links)
+        (list (reverse acc) continuation depth)
+        (loop (cdr links)
+              (+ depth 1)
+              (if (= depth 0) "" (string-append continuation "  "))
+              (cons (groot-row (groot-entry (car links) (file-name (car links)) 'directory)
+                               depth
+                               (if (= depth 0) "" (string-append continuation "└╴")))
+                    acc)))))
+
+;; Emits the file rows for one parent, elbowing the final entry.
+(define (groot-file-rows files continuation depth)
+  (let loop ([items files] [acc '()])
+    (if (null? items)
+        (reverse acc)
+        (loop (cdr items)
+              (cons (groot-row (groot-entry (car items) (file-name (car items)) 'file)
+                               depth
+                               (string-append continuation
+                                              (if (null? (cdr items)) "└╴" "├╴")))
+                    acc)))))
+
+;; Groups ranked result paths under the directories that contain them, drawing
+;; each parent as nested rows rather than one joined path. Parents keep
+;; first-match order so the best hit stays near the top.
+(define (groot-search-rows paths)
+  (define root (groot-root))
+  (define separator (path-separator))
+  (define order '())
+  (define groups (hash))
+  (for-each
+   (lambda (path)
+     (define parent (groot-parent-path path separator))
+     (unless (hash-contains? groups parent) (set! order (cons parent order)))
+     (set! groups
+           (hash-insert groups parent
+                        (cons path (if (hash-contains? groups parent)
+                                       (hash-try-get groups parent)
+                                       '())))))
+   paths)
+  (apply append
+         (map (lambda (parent)
+                (define header
+                  (groot-header-rows
+                   (groot-ancestor-chain root parent separator *groot-header-depth*)))
+                (append (car header)
+                        (groot-file-rows (reverse (hash-try-get groups parent))
+                                         (cadr header)
+                                         (caddr header))))
+              (reverse order))))
 
 ;; Recomputes search results, narrowing from the previous candidate set where safe.
 (define (groot-refresh-search! previous-query)
@@ -201,11 +291,16 @@
                                                        (groot-get 'files '())
                                                        (groot-get 'results '())))
   (groot-put! 'results (if (equal? query "") '() (fuzzy-match query candidates)))
+  ;; Counted once here; the header would otherwise walk the list on every redraw.
+  (groot-put! 'result-count (length (groot-get 'results '())))
+  ;; Narrowing keeps the full ranked list; only the rendered slice is built.
+  ;; ponytail: row building grows superlinearly past a few thousand rows, so the
+  ;; cap is what keeps this cheap. Raise it and measure before trusting it.
   (groot-put! 'result-rows
-              (list->vector
-               (map (lambda (path) (groot-row (groot-entry path (file-name path) 'file) 0))
-                    (groot-get 'results '()))))
-  (groot-put! 'cursor 0)
+              (list->vector (groot-search-rows (take (groot-get 'results '())
+                                                     *groot-max-results*))))
+  ;; Headers open each group, so land on the first row that can be activated.
+  (groot-put! 'cursor (groot-selectable-index 0 1))
   (groot-put! 'window 0))
 
 ;; Clears incomplete normal-mode prefixes and any active jump prompt.
@@ -255,7 +350,8 @@
          (define first-index (groot-jump-character-index alphabet (string-ref first-input 0)))
          (define row (+ (* first-index alphabet-size) character-index))
          (when (< row (groot-visible-count))
-           (groot-put! 'cursor (+ (groot-get 'window 0) row))
+           (groot-put! 'cursor (let ([index (+ (groot-get 'window 0) row)])
+                                 (if (groot-searching?) (groot-selectable-index index 1) index)))
            (groot-clamp!))
          (groot-clear-jump!)]))
 
@@ -297,27 +393,50 @@
   (when row
     (define entry (groot-row-entry row))
     (if (groot-directory? entry)
-        (groot-toggle-current!)
+        ;; Search headers are labels; only tree directories toggle.
+        (unless (groot-searching?) (groot-toggle-current!))
         (begin (groot-put! 'focused? #f)
                (enqueue-thread-local-callback (lambda () (helix.open (groot-entry-path entry))))))))
+
+;; Returns the nearest selectable row, preferring the direction of travel.
+;; Search headers are labels, so j/k step over them instead of landing on one.
+(define (groot-selectable-index index step)
+  (define items (groot-active-items))
+  (define count (vector-length items))
+  (define (header? i) (groot-directory? (groot-row-entry (vector-ref items i))))
+  (define (scan i direction)
+    (cond [(or (< i 0) (>= i count)) #f]
+          [(not (header? i)) i]
+          [else (scan (+ i direction) direction)]))
+  (if (or (< index 0) (>= index count) (not (header? index)))
+      index
+      (or (scan index step) (scan index (- 0 step)) index)))
 
 ;; Moves selection by delta rows.
 (define (groot-move! delta)
   (define position (groot-window-after-move (groot-get 'cursor 0) (groot-get 'window 0)
                                              (groot-active-count) (groot-get 'height 1) delta))
-  (groot-put! 'cursor (car position))
-  (groot-put! 'window (cadr position)))
+  (define cursor
+    (if (groot-searching?)
+        (groot-selectable-index (car position) (if (< delta 0) -1 1))
+        (car position)))
+  (define final (groot-clamp-position cursor (cadr position)
+                                      (groot-active-count) (groot-get 'height 1)))
+  (groot-put! 'cursor (car final))
+  (groot-put! 'window (cadr final)))
 
 ;; Moves selection to the first active row.
 (define (groot-move-top!)
-  (groot-put! 'cursor 0)
+  (groot-put! 'cursor (if (groot-searching?) (groot-selectable-index 0 1) 0))
   (groot-put! 'window 0))
 
 ;; Moves selection to the final active row and makes it visible.
 (define (groot-move-bottom!)
   (define count (groot-active-count))
   (when (> count 0)
-    (groot-put! 'cursor (- count 1))
+    (groot-put! 'cursor (if (groot-searching?)
+                            (groot-selectable-index (- count 1) -1)
+                            (- count 1)))
     (groot-put! 'window (max 0 (- count (groot-get 'height 1))))))
 
 ;; Centers the selected row in the active viewport.
@@ -344,7 +463,7 @@
 ;; Converts a click row into an active item index, excluding the title row.
 (define (groot-mouse-row-index event)
   (define row (event-mouse-row event))
-  (define relative (and row (- row 2)))
+  (define relative (and row (- row *groot-list-top*)))
   (define index (and relative (+ (groot-get 'window 0) relative)))
   (if (and relative index (>= relative 0) (< relative (groot-get 'height 1))
            (< index (groot-active-count)))
@@ -421,6 +540,56 @@
     (register-hook 'document-opened (lambda (_id) (groot-sync-current-file!)))
     (register-hook 'post-command groot-post-command-sync!)))
 
+;; Draws the rounded input frame and centres its title on the top border.
+(define (groot-render-box! frame content-x content-width border-style title-style)
+  (define inner (max 0 (- content-width 2)))
+  (define fill (make-string inner #\─))
+  (frame-set-string! frame content-x 0
+                     (groot-truncate (string-append "╭" fill "╮") content-width) border-style)
+  (frame-set-string! frame content-x 2
+                     (groot-truncate (string-append "╰" fill "╯") content-width) border-style)
+  (frame-set-string! frame content-x 1 "│" border-style)
+  (frame-set-string! frame (+ content-x (- content-width 1)) 1 "│" border-style)
+  ;; The title only goes on when both corners still have a border segment left.
+  (define label (string-append " " *groot-input-title* " "))
+  (when (>= inner (+ (string-length label) 2))
+    (frame-set-string! frame
+                       (+ content-x (quotient (- content-width (string-length label)) 2))
+                       0 label title-style)))
+
+;; Draws the search input: a prompt glyph, the query with a caret, and the
+;; right-aligned match counts. Outside search mode it is just the panel name.
+;; The counts report rendered rows against total matches, so a capped result
+;; set is visible rather than silently short.
+(define (groot-render-header! frame content-x content-width text-style directory-fg guide-fg)
+  (define accent-style (if directory-fg (style-fg text-style directory-fg) text-style))
+  (define muted-style (if guide-fg (style-fg text-style guide-fg) text-style))
+  (define prompt-idle (groot-truncate (string-append *groot-search-icon* " ") content-width))
+  (if (or (groot-get 'search-input? #f) (groot-searching?))
+      (let* ([total (groot-get 'result-count 0)]
+             [counts (if (> total 0)
+                         (string-append (to-string (min total *groot-max-results*))
+                                        "/" (to-string total))
+                         "")]
+             [prompt (string-append *groot-search-icon* " ")]
+             ;; One blank column keeps the caret off the counts. Nested on purpose:
+             ;; a four-argument (- ...) panics the Steel JIT.
+             [reserved (+ (string-length prompt) (string-length counts) 1)]
+             [budget (max 1 (- content-width reserved))]
+             [typed (string-append
+                     (groot-truncate-start (groot-get 'query "") (- budget 1))
+                     *groot-search-caret*)])
+        (frame-set-string! frame content-x 1 prompt accent-style)
+        (frame-set-string! frame (+ content-x (string-length prompt)) 1
+                           (groot-truncate typed budget) text-style)
+        ;; Drop the counts rather than let them collide with the prompt.
+        (unless (or (equal? counts "") (< (- content-width reserved) 2))
+          (frame-set-string! frame
+                             (- (+ content-x content-width) (string-length counts)) 1
+                             counts muted-style)))
+      ;; Idle input still shows its prompt, so the field never reads as absent.
+      (frame-set-string! frame content-x 1 prompt-idle accent-style)))
+
 ;; Renders the sidebar and records the terminal geometry for input handling.
 (define (groot-render state rect frame)
   (set! *groot-last-rect* rect)
@@ -429,9 +598,10 @@
   (define x0 (if (equal? *groot-side* 'right) (- (area-width rect) width) 0))
   ;; The separator owns one column, keeping panel text out of the editor area.
   (define separator-x (if (equal? *groot-side* 'right) x0 (+ x0 (- width 1))))
-  (define content-x (if (equal? *groot-side* 'right) (+ x0 1) x0))
-  (define content-width (max 1 (- width 1)))
-  (groot-put! 'height (max 1 (- height 2)))
+  ;; One column of padding keeps rows off the panel edge; the other is the separator.
+  (define content-x (+ x0 1))
+  (define content-width (max 1 (- width 2)))
+  (groot-put! 'height (max 1 (- height *groot-list-top*)))
   (groot-clamp!)
   (if (equal? *groot-side* 'right) (set-editor-clip-right! width) (set-editor-clip-left! width))
   (define text-style (theme-scope-ref "ui.text"))
@@ -441,35 +611,46 @@
   (define directory-fg (style->fg directory-style))
   ;; Style used for virtual two-character jump labels, matching Helix's editor UI.
   (define jump-style (theme-scope-ref "ui.virtual.jump-label"))
+  ;; Tree guides borrow Helix's indent-guide accent so they stay quieter than the rows.
+  (define guide-fg
+    (or (style->fg (theme-scope-ref "ui.virtual.indent-guide"))
+        (style->fg (theme-scope-ref "comment"))))
   ;; Focus uses normal text; an unfocused panel inherits the directory foreground.
   (define separator-style
     (if (groot-get 'focused? #f)
         text-style
         (if directory-fg (style-fg text-style directory-fg) text-style)))
   (buffer/clear-with frame (area x0 0 width height) (theme-scope-ref "ui.background"))
-  (frame-set-string! frame content-x 0
-                     (groot-truncate (if (groot-searching?) (groot-get 'query "") "groot") content-width)
-                     text-style)
+  (groot-render-box! frame content-x content-width
+                     (if guide-fg (style-fg text-style guide-fg) text-style)
+                     (if directory-fg (style-fg text-style directory-fg) text-style))
+  (groot-render-header! frame (+ content-x 1) (max 1 (- content-width 2)) text-style
+                        directory-fg guide-fg)
   (define items (groot-active-items))
   (for-each
    (lambda (pair)
      (define index (car pair))
      (define row (vector-ref items index))
      (define entry (groot-row-entry row))
-     (define depth (groot-row-depth row))
      (define selected? (= index (groot-get 'cursor 0)))
      (define directory? (groot-directory? entry))
      (define style (if selected? selected-style text-style))
-     (define expanded (groot-get 'expanded (hash)))
-     (define marker
-       (if directory?
-           (if (if (hash-contains? expanded (groot-entry-path entry))
-                   (hash-try-get expanded (groot-entry-path entry))
-                   #t)
-               "▶ " "▼ ")
-           "  "))
-     (define name (if (groot-searching?) (groot-entry-path entry) (groot-entry-name entry)))
-     (define icon (if directory? (glyph-dir-icon name) (glyph-icon name)))
+     ;; Tree guides are precomputed per row; no per-row fold marker is drawn.
+     (define prefix (groot-row-prefix row))
+     (define expanded?
+       (and directory?
+            (not (groot-searching?))
+            (not (let ([expanded (groot-get 'expanded (hash))]
+                       [path (groot-entry-path entry)])
+                   (if (hash-contains? expanded path) (hash-try-get expanded path) #t)))))
+     (define name (groot-entry-name entry))
+     ;; Search headers display a root-relative path; icons still key off the basename.
+     (define icon-name (file-name (groot-entry-path entry)))
+     ;; An open folder marks expansion; collapsed directories keep their glyph.hx icon.
+     (define icon
+       (cond [expanded? *groot-open-dir-icon*]
+             [directory? (glyph-dir-icon icon-name)]
+             [else (glyph-icon icon-name)]))
      (define theme-accent-style
        (if (and directory? directory-fg) (style-fg style directory-fg) style))
      ;; Directory names use the current theme accent; file names use Helix text styling.
@@ -480,23 +661,27 @@
      ;; File icons keep glyph colors; directory icons share the theme's directory accent.
      (define icon-style
        (if (groot-entry-icon-uses-glyph-color? entry)
-           (glyph-style (glyph-color name) #:base style)
+           (glyph-style (glyph-color icon-name) #:base style)
            theme-accent-style))
      ;; Labels overlay the filename itself, never participate in row layout.
-     (define icon-x (+ content-x (* 2 depth) (string-length marker)))
+     (define icon-x (+ content-x (string-length prefix)))
      (define name-x (+ icon-x (string-length icon) 1))
-     (define y (+ 2 (- index (groot-get 'window 0))))
+     (define y (+ *groot-list-top* (- index (groot-get 'window 0))))
      (define jump-row (- index (groot-get 'window 0)))
      (define jump-label
        (if (groot-get 'jump-active? #f)
            (groot-jump-label (groot-get 'jump-alphabet *groot-default-jump-alphabet*) jump-row)
            ""))
      (define row-text
-       (string-append (make-string (* 2 depth) #\space) marker icon " " name))
+       (string-append prefix icon " " name))
      (when selected? (frame-set-string! frame content-x y (make-string content-width #\space) selected-style))
      (frame-set-string! frame content-x y
                         (groot-truncate row-text content-width)
                         name-style)
+     ;; Guides stay muted instead of inheriting the row's text or directory accent.
+     (when (> (string-length prefix) 0)
+       (frame-set-string! frame content-x y (groot-truncate prefix content-width)
+                          (if guide-fg (style-fg style guide-fg) style)))
      (when (< icon-x (+ content-x content-width))
        (frame-set-string! frame icon-x y
                           (groot-truncate icon (- (+ content-x content-width) icon-x))
@@ -531,7 +716,9 @@
         [(groot-get 'jump-active? #f) (groot-handle-jump-event event)]
         [(groot-get 'search-input? #f)
       (cond [(key-event-escape? event) (groot-put! 'search-input? #f) event-result/consume]
-            [(key-event-enter? event) (groot-put! 'search-input? #f) (groot-activate!) event-result/consume]
+            ;; Enter leaves the query in place and hands the results to the
+            ;; navigation keys; opening takes a second Enter on a chosen row.
+            [(key-event-enter? event) (groot-put! 'search-input? #f) event-result/consume]
             [(key-event-backspace? event) (groot-backspace!) event-result/consume]
             [(char? character) (groot-type! character) event-result/consume]
             [else event-result/consume])]
@@ -564,6 +751,9 @@
             [(and (char? character) (equal? character #\q))
              (groot-clear-pending!) (groot-close!) event-result/consume]
             [(and (char? character) (equal? character #\R)) (groot-clear-pending!) (groot-refresh) event-result/consume]
+            ;; Let Helix own its command prompt even while the explorer has focus.
+            [(and (char? character) (equal? character #\:))
+             (groot-clear-pending!) event-result/ignore]
             [else (groot-clear-pending!) event-result/consume])]))
 
 ;; Creates the component used by Helix's compositor.
