@@ -147,10 +147,20 @@
   (define separator (path-separator))
   (when (groot-path-inside? root path separator)
     (define expanded (groot-get 'expanded (hash)))
-    (for-each (lambda (ancestor)
-                (groot-load-directory! ancestor)
-                (set! expanded (hash-insert expanded ancestor #f)))
-              (groot-ancestor-paths root path separator))
+    (define (cached-path parent expected)
+      (let loop ([entries (groot-children parent)])
+        (cond [(null? entries) expected]
+              [(groot-path=? (groot-entry-path (car entries)) expected separator)
+               (groot-entry-path (car entries))]
+              [else (loop (cdr entries))])))
+    (let loop ([ancestors (groot-ancestor-paths root path separator)] [parent root])
+      (unless (null? ancestors)
+        (define ancestor (if (groot-path=? (car ancestors) root separator)
+                             root
+                             (cached-path parent (car ancestors))))
+        (groot-load-directory! ancestor)
+        (set! expanded (hash-insert expanded ancestor #f))
+        (loop (cdr ancestors) ancestor)))
     (groot-put! 'expanded expanded)
     (groot-rebuild-tree!)))
 
@@ -159,7 +169,8 @@
   (define items (groot-active-items))
   (let loop ([idx 0])
     (cond [(>= idx (vector-length items)) #f]
-          [(equal? (groot-entry-path (groot-row-entry (vector-ref items idx))) path) idx]
+          [(groot-path=? (groot-entry-path (groot-row-entry (vector-ref items idx)))
+                         path (path-separator)) idx]
           [else (loop (+ idx 1))])))
 
 ;; Keeps cursor and viewport valid after any state transition or terminal resize.
@@ -170,12 +181,19 @@
   (groot-put! 'window (cadr position)))
 
 ;; Reveals path when it belongs to this workspace and remembers failed attempts too.
+;; A true result means the rebuilt active rows actually contain and select path.
 (define (groot-reveal! path)
   (groot-put! 'last-document path)
-  (when (and (string? path) (groot-path-inside? (groot-root) path (path-separator)))
-    (groot-open-ancestors! path)
-    (let ([idx (groot-find-index path)])
-      (when idx (groot-put! 'cursor idx) (groot-clamp!)))))
+  (define root (groot-root))
+  (and (string? path) (groot-path-inside? root path (path-separator))
+       (let ([idx (if (groot-path=? path root (path-separator))
+                      ;; Root is already the rebuilt tree's synthetic row.  Do not
+                      ;; derive its parent: at / that traversal cannot progress.
+                      (groot-find-index root)
+                      (begin
+                        (groot-open-ancestors! path)
+                        (groot-find-index path)))])
+         (and idx (begin (groot-put! 'cursor idx) (groot-clamp!) #t)))))
 
 ;; Reads the focused editor document path without allowing UI errors to escape.
 (define (groot-current-document-path)
@@ -506,20 +524,197 @@
               [else #f]))))
 
 ;; Clears every filesystem cache and reconstructs the root listing.
+(define (groot-refresh-tree!)
+  (define root (groot-root))
+  (groot-put! 'children (hash))
+  (groot-put! 'files '())
+  (groot-put! 'search-ready? #f)
+  (groot-load-directory! root)
+  (groot-rebuild-tree!)
+  (groot-clamp!))
+
+;; Deletion recovery cannot use the display reader: its suppressed error and
+;; synthetic root row would falsely prove the root is available. On failure,
+;; leave an empty, clamped tree state without recreating anything and return an
+;; explicit result for the integration layer's combined outcome message.
+(define (groot-refresh-tree-after-deletion!)
+  (define root (groot-root))
+  (groot-put! 'children (hash))
+  (groot-put! 'files '())
+  (groot-put! 'search-ready? #f)
+  (with-handler
+   (lambda (error)
+     ;; Cache an explicitly unavailable empty root so rebuilding cannot fall
+     ;; through to groot-fs-read-directory's display-only suppression.
+     (groot-put! 'children (hash-insert (groot-get 'children (hash)) root '()))
+     (groot-rebuild-tree!)
+     (groot-clamp!)
+     (list 'root-unavailable (to-string error)))
+   (begin
+     (groot-put! 'children
+                 (hash-insert (groot-get 'children (hash)) root
+                              (groot-fs-read-directory/strict root)))
+     (groot-rebuild-tree!)
+     (groot-clamp!)
+     'refreshed)))
+
+;; Refreshes normally, including search results and redraw.
 (define (groot-refresh)
   (groot-refresh-effects!
    (and *groot-state* (groot-get 'active? #f))
    (groot-searching?)
-   (lambda ()
-     (define root (groot-root))
-     (groot-put! 'children (hash))
-     (groot-put! 'files '())
-     (groot-put! 'search-ready? #f)
-     (groot-load-directory! root)
-     (groot-rebuild-tree!)
-     (groot-clamp!))
+   groot-refresh-tree!
    (lambda () (groot-refresh-search! ""))
    (lambda () (helix.redraw))))
+
+;; Moves cached expansion state with a renamed directory.  The next refresh
+;; drops listings, but expansion keys must retain their new identities so reveal
+;; can rebuild the same expanded destination subtree without stale source keys.
+(define (groot-migrate-expanded-subtree! source destination)
+  (define separator (path-separator))
+  (define (migrate path)
+    (if (groot-path-inside? source path separator)
+        (string-append destination (substring path (string-length source) (string-length path)))
+        path))
+  (define (copy pairs expanded)
+    (if (null? pairs)
+        expanded
+        (let ([pair (car pairs)])
+          (copy (cdr pairs)
+                (hash-insert expanded (migrate (car pair)) (cdr pair))))))
+  (groot-put! 'expanded (copy (hash->list (groot-get 'expanded (hash))) (hash))))
+
+;; Handles a completed rename without activating an editor buffer.
+(define (groot-renamed-entry! source destination)
+  (groot-migrate-expanded-subtree! source destination)
+  (groot-renamed-entry-effects!
+   source destination
+   groot-refresh-tree!
+   groot-reveal!
+   (lambda () (helix.redraw))
+   set-error!
+   (lambda () (groot-get 'last-document #f))
+   (lambda (path) (groot-put! 'last-document path))))
+
+;; Drops folded-state identities at and beneath a deleted entry.  Listings and
+;; search indexes are cleared separately by the refresh below.
+(define (groot-drop-expanded-subtree! source)
+  (define separator (path-separator))
+  (define (copy pairs result)
+    (if (null? pairs)
+        result
+        (let ([pair (car pairs)])
+          (copy (cdr pairs)
+                (if (groot-path-inside? source (car pair) separator)
+                    result
+                    (hash-insert result (car pair) (cdr pair)))))))
+  (groot-put! 'expanded (copy (hash->list (groot-get 'expanded (hash))) (hash))))
+
+;; Displays the recorded native outcome without changing Helix's focused
+;; document.  The ancestor list is captured from the original root/source and
+;; live probes ensure the synthetic root row is never treated as evidence.
+(define (groot-deleted-entry! root source result)
+  (groot-deleted-entry-effects!
+   source result
+   (groot-delete-surviving-ancestors root source (path-separator))
+   (lambda () (groot-drop-expanded-subtree! source))
+   groot-refresh-tree-after-deletion!
+   (lambda (path)
+     (with-handler (lambda (_) #f)
+       (equal? (groot-fs-live-entry-kind path) 'directory)))
+   groot-reveal!
+   (lambda () (helix.redraw))
+   set-error!
+   (lambda () (groot-get 'last-document #f))
+   (lambda (path) (groot-put! 'last-document path))))
+
+(define (groot-created-entry! result)
+  (groot-created-entry-effects!
+   result
+   (lambda (path) (groot-drop-expanded-subtree! path))
+   groot-refresh-tree!
+   groot-reveal!
+   (lambda () (helix.redraw))
+   set-error!
+   (lambda () (groot-get 'last-document #f))
+   (lambda (path) (groot-put! 'last-document path))))
+
+;; Uses the viewport that rendered the live sidebar.  Opening before its first
+;; render falls back to the configured sidebar width rather than assuming a
+;; terminal geometry that may not exist yet.
+(define (groot-create-prompt-width)
+  (with-handler
+   (lambda (_) *groot-width*)
+   (if *groot-last-rect*
+       (max 1 (area-width *groot-last-rect*))
+       *groot-width*)))
+
+;; Captures the selected directory (or a leaf's lexical parent) before native
+;; prompt input can change focus or selection.
+(define (groot-open-create-prompt!)
+  (define row (groot-current-row))
+  (define destination
+    (groot-create-destination
+     (groot-root)
+     (and row (groot-row-entry row))
+     (path-separator)))
+  ;; Capture before allocating the prompt: later focus or filesystem changes
+  ;; cannot redirect submitted components.
+  (with-handler
+   (lambda (error) (set-error! (string-append "Cannot create in " destination ": " (to-string error))))
+   (let ([context (groot-fs-capture-create-context destination)])
+     (groot-create-prompt-effects!
+      context
+      (groot-create-prompt-label destination (groot-create-prompt-width))
+      prompt push-component! groot-fs-create-entry groot-created-entry! set-error!))))
+
+;; Reads every filesystem-backed open document immediately before rename.
+(define (groot-open-document-paths)
+  (map editor-document->path (editor-all-documents)))
+
+;; Captures the root, source, kind, and resolved address facts before the native
+;; prompt owns input.  The filesystem boundary repeats those checks after yes.
+(define (groot-open-delete-prompt!)
+  (define row (groot-current-row))
+  (define entry (and row (groot-row-entry row)))
+  (define root (groot-root))
+  (groot-delete-request-effects!
+   entry root
+   (lambda ()
+     (define source (groot-entry-path entry))
+     (with-handler
+      (lambda (error) (set-error! (string-append "Cannot delete " (groot-entry-name entry) ": " (to-string error))))
+      (let ([context (groot-fs-capture-delete-context root source)])
+        (groot-delete-prompt-effects!
+         context (groot-delete-target-label root source (path-separator))
+         (GrootFsDeleteContext-kind context)
+         groot-create-prompt-width groot-delete-prompt-label
+         prompt push-component! groot-open-document-paths groot-fs-delete-entry
+         (lambda (result) (groot-deleted-entry! root source result)) set-error!))))
+   set-error!))
+
+;; Captures only a regular file or directory; symbolic links deliberately remain
+;; unsupported because their target and document ownership are ambiguous.
+(define (groot-open-rename-prompt!)
+  (define row (groot-current-row))
+  (define entry (and row (groot-row-entry row)))
+  (when (and entry
+             ;; The synthetic workspace-root row has no lexical parent in this
+             ;; explorer.  Reject it before allocating a prompt or retaining a
+             ;; stale root path.
+             (not (equal? (groot-entry-path entry) (groot-root)))
+             (or (equal? (groot-entry-kind entry) 'file) (groot-directory? entry)))
+    (define source (groot-entry-path entry))
+    (groot-rename-prompt-effects!
+     source
+     (groot-rename-prompt-label (groot-entry-name entry) (groot-create-prompt-width))
+     prompt push-component!
+     groot-open-document-paths
+     (lambda (source document-paths)
+       (groot-rename-open-document-conflict? source document-paths (path-separator)))
+     groot-fs-rename-entry
+     (lambda (destination) (groot-renamed-entry! source destination))
+     set-error!)))
 
 ;; Closes the component and releases the editor clipping owned by this sidebar.
 (define (groot-close!)
@@ -711,10 +906,20 @@
 (define (groot-handle-event state event)
   (define character (key-event-char event))
   (define mouse-result (groot-handle-mouse-event event))
+  ;; Keep this decision at the live event boundary; tests exercise the same
+  ;; focus/mode precedence that controls native prompt availability.
+  (define dispatch
+    (groot-key-dispatch (groot-get 'focused? #f)
+                        (groot-get 'jump-active? #f)
+                        (groot-get 'search-input? #f)
+                        (groot-searching?)
+                        (groot-get 'pending-g? #f)
+                        (groot-get 'pending-z? #f)
+                        (if (key-event-escape? event) 'escape character)))
   (cond [mouse-result mouse-result]
-        [(not (groot-get 'focused? #f)) event-result/ignore]
-        [(groot-get 'jump-active? #f) (groot-handle-jump-event event)]
-        [(groot-get 'search-input? #f)
+        [(equal? dispatch 'ignore) event-result/ignore]
+        [(equal? dispatch 'jump) (groot-handle-jump-event event)]
+        [(equal? dispatch 'search-input)
       (cond [(key-event-escape? event) (groot-put! 'search-input? #f) event-result/consume]
             ;; Enter leaves the query in place and hands the results to the
             ;; navigation keys; opening takes a second Enter on a chosen row.
@@ -723,7 +928,21 @@
             [(char? character) (groot-type! character) event-result/consume]
             [else event-result/consume])]
         [else
-        (cond [(and (groot-get 'pending-g? #f) (char? character) (equal? character #\w))
+        (cond [(equal? dispatch 'focus-editor)
+               (groot-put! 'focused? #f) event-result/consume]
+              [(or (equal? dispatch 'create) (equal? dispatch 'create-clear-pending))
+               (groot-clear-pending!) (groot-open-create-prompt!) event-result/consume]
+              [(or (equal? dispatch 'delete) (equal? dispatch 'delete-clear-pending))
+               (groot-clear-pending!) (groot-open-delete-prompt!) event-result/consume]
+              [(or (equal? dispatch 'rename) (equal? dispatch 'rename-clear-pending))
+               (groot-clear-pending!) (groot-open-rename-prompt!) event-result/consume]
+              [(equal? dispatch 'refresh)
+               (groot-clear-pending!) (groot-refresh) event-result/consume]
+              [(equal? dispatch 'navigation)
+               (groot-clear-pending!)
+               (groot-move! (groot-navigation-delta character))
+               event-result/consume]
+              [(and (groot-get 'pending-g? #f) (char? character) (equal? character #\w))
               (groot-enter-jump!) event-result/consume]
             [(and (groot-get 'pending-g? #f) (char? character) (equal? character #\e))
               (groot-clear-pending!) (groot-move-bottom!) event-result/consume]
@@ -740,17 +959,12 @@
               (groot-put! 'pending-g? #f) (groot-put! 'pending-z? #t) event-result/consume]
             [(key-event-down? event) (groot-clear-pending!) (groot-move! 1) event-result/consume]
             [(key-event-up? event) (groot-clear-pending!) (groot-move! -1) event-result/consume]
-            [(and (char? character) (groot-navigation-delta character))
-             (groot-clear-pending!)
-             (groot-move! (groot-navigation-delta character))
-             event-result/consume]
             [(key-event-enter? event) (groot-clear-pending!) (groot-activate!) event-result/consume]
             [(key-event-tab? event) (groot-clear-pending!) (groot-toggle-current!) event-result/consume]
             [(and (char? character) (equal? character #\/))
              (groot-clear-pending!) (groot-put! 'query "") (groot-put! 'search-input? #t) event-result/consume]
             [(and (char? character) (equal? character #\q))
              (groot-clear-pending!) (groot-close!) event-result/consume]
-            [(and (char? character) (equal? character #\R)) (groot-clear-pending!) (groot-refresh) event-result/consume]
             ;; Let Helix own its command prompt even while the explorer has focus.
             [(and (char? character) (equal? character #\:))
              (groot-clear-pending!) event-result/ignore]

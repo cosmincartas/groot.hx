@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>File Operations UI</title></head>
+<body style="background:#191724;color:#e0def4;font:16px monospace;padding:24px">
+<h1>File Operations: Built-in Helix Prompts</h1>
+<p>Static terminal mock. The host controls prompt styling, editing, and placement.</p>
+<section id="UI-1">
+<h2>UI-1: Rename prompt</h2>
+<p>Keep the sidebar header unchanged. Open the host prompt at the bottom of the editor.</p>
+<h3>File selected</h3>
+<pre style="border:1px solid #908caa;padding:12px">Groot              │ Editor
+▾ src/             │
+<span style="background:#403d52">  main.scm         </span>│
+─────────────────────────────────────
+Rename main.scm: ▏</pre>
+<h3>Directory selected</h3>
+<pre style="border:1px solid #908caa;padding:12px">Groot              │ Editor
+<span style="background:#403d52">▾ src/             </span>│
+  main.scm         │
+─────────────────────────────────────
+Rename src: ▏</pre>
+<h3>Editing</h3>
+<pre style="border:1px solid #908caa;padding:12px">Rename main.scm: app.scm▏</pre>
+<h3>Narrow editor</h3>
+<pre style="border:1px solid #908caa;padding:12px;width:22ch;overflow:hidden">Rename main…: app.scm▏</pre>
+<p>Shorten the selected name label to preserve input space. The host controls input scrolling and clipping.</p>
+<h3>Submission</h3>
+<p>Enter submits and closes the host prompt. No separate loading widget is proposed.</p>
+<p>Use the host text editing and paste controls. Escape or Ctrl-C cancels before submission.</p>
+<p>Capture the selected entry when opening the prompt. The host consumes mouse input while the prompt remains open.</p>
+</section>
+<section id="UI-2">
+<h2>UI-2: Rename result</h2>
+<h3>Success</h3>
+<pre style="border:1px solid #908caa;padding:12px">Groot              │ Editor
+▾ src/             │
+<span style="background:#403d52">  app.scm          </span>│</pre>
+<p>Refresh the tree and select the renamed entry. Do not open an editor buffer.</p>
+<h3>Error</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Groot              │ Editor
+▾ src/             │
+  main.scm         │
+─────────────────────────────────────
+Error: Entry already exists: src/app.scm</pre>
+<p>Use the host error area for invalid names, collisions, and filesystem failures.</p>
+<p>The prompt closes after submission, including failure. Press r to retry with the current selection.</p>
+<h3>Cancelled</h3>
+<p>Keep the previous tree selection. Do not change the filesystem.</p>
+<p>Normal tree input resumes after submission or cancellation.</p>
+</section>
+<section id="UI-3">
+<h2>UI-3: Permanent delete confirmation</h2>
+<p>These delete mocks extend the retained rename reference above. The host controls prompt placement and styling.</p>
+<h3>File selected: empty input</h3>
+<pre style="border:1px solid #908caa;padding:12px">Groot              │ Editor
+▾ src/             │
+<span style="background:#403d52">  main.scm         </span>│
+────────────────────────────────────────────────────────────
+Permanently delete src/main.scm? Type yes: ▏</pre>
+<h3>Directory selected</h3>
+<pre style="border:1px solid #908caa;padding:12px">Permanently delete src/ and ALL contents? Type yes: ▏</pre>
+<p>ALL contents includes hidden and explorer-excluded entries. The confirmation does not count entries.</p>
+<h3>Symbolic link selected</h3>
+<pre style="border:1px solid #908caa;padding:12px">Permanently delete link current? Type yes: ▏</pre>
+<p>Delete the link only. Keep its target unchanged.</p>
+<h3>Confirmation input</h3>
+<pre style="border:1px solid #908caa;padding:12px">Permanently delete src/ and ALL contents? Type yes: yes▏</pre>
+<p>Enter submits and closes the prompt. Only exact lowercase yes authorizes deletion.</p>
+<p>Empty input, other text, Escape, or Ctrl-C cancels without filesystem changes.</p>
+<h3>Narrow editor</h3>
+<pre style="border:1px solid #908caa;padding:12px;width:42ch;overflow:hidden">Permanent delete …/src/ +ALL? yes: ▏</pre>
+<p>Shorten the target label, not the permanent-deletion warning or directory-contents warning.</p>
+<p>Keep the selected row visible behind the prompt. Preserve space for yes input.</p>
+<h3>Insufficient display space</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Cannot show delete confirmation. Widen the editor.</pre>
+<p>If the warning and usable input cannot fit, reject the request without deletion.</p>
+<p>Check width before opening and again before deletion. Reject submission if a resize leaves insufficient space.</p>
+<h3>Submission and cancellation</h3>
+<p>Capture the selected path and kind before opening the prompt. Do not change the target during input.</p>
+<p>Use native prompt editing and paste controls. The host consumes mouse input while the prompt remains open.</p>
+<p>No separate progress widget exists. Escape cancels before submission, not after deletion starts.</p>
+</section>
+<section id="UI-4">
+<h2>UI-4: Delete result</h2>
+<h3>Success</h3>
+<pre style="border:1px solid #908caa;padding:12px">Groot              │ Editor
+<span style="background:#403d52">▾ src/             </span>│
+  remaining.scm    │</pre>
+<p>Refresh the tree and select the surviving parent. Preserve editor document focus.</p>
+<h3>Empty parent</h3>
+<pre style="border:1px solid #908caa;padding:12px">Groot              │ Editor
+<span style="background:#403d52">▾ src/             </span>│</pre>
+<p>Keep the empty parent selected. Deleting its final child does not delete the parent.</p>
+<h3>Parent disappears externally</h3>
+<p>Select the nearest surviving ancestor within the captured root.</p>
+<h3>Root unavailable</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Explorer root unavailable. Could not select a surviving parent.</pre>
+<p>Keep selection clamped. Do not recreate directories or select an ancestor outside the root.</p>
+<h3>Open-document rejection</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Cannot delete src/: it contains an open document.</pre>
+<h3>Invalid or changed target</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Cannot delete src/main.scm: the target is missing or changed.</pre>
+<p>Report root, outside-root, and unsupported-target rejection through the host error area.</p>
+<p>An empty selection opens no prompt and makes no filesystem changes.</p>
+<h3>Deletion failure</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Could not delete src/main.scm: permission denied.</pre>
+<h3>Possible partial deletion</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Could not finish deleting src/: permission denied.
+Some contents may already be deleted. No rollback occurred.</pre>
+<p>Stop deletion and attempt to refresh the remaining entries. Do not report complete success.</p>
+<h3>Display failure after deletion</h3>
+<pre style="border:1px solid #eb6f92;padding:12px">Deleted src/main.scm, but the tree could not refresh.
+Press R to refresh.</pre>
+<p>Do not restore entries or repeat deletion because display failed.</p>
+<h3>Cancelled</h3>
+<p>Close the prompt and preserve the filesystem and selection. Resume normal tree input.</p>
+<h3>Retry</h3>
+<p>After an error, inspect the remaining entries. Press d to request deletion of the current selection again.</p>
+<p>On narrow displays, let the host render errors. Do not replace detailed errors with success messages.</p>
+</section>
+</body>
+</html>
