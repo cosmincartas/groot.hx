@@ -12,7 +12,7 @@
 (require "groot/groot-fs.scm")
 (require "groot/groot-integration.scm")
 
-(provide groot-open groot-refresh groot-configure!)
+(provide groot-open groot-refresh groot-collapse-all groot-configure!)
 
 ;; Sidebar width in terminal cells.
 (define *groot-width* 32)
@@ -216,7 +216,9 @@
 
 ;; Synchronizes only after commands that leave a valid focused editor view.
 (define (groot-post-command-sync! command)
-  (unless (hashset-contains? *groot-view-teardown-commands* (groot-command-name command))
+  (define name (groot-command-name command))
+  (unless (or (hashset-contains? *groot-view-teardown-commands* name)
+              (equal? name "groot-collapse-all"))
     (groot-sync-current-file!)))
 
 ;; Walks the tree in process, skipping symlink recursion. Correct but single
@@ -566,6 +568,10 @@
    groot-refresh-tree!
    (lambda () (groot-refresh-search! ""))
    (lambda () (helix.redraw))))
+
+;; Restores the active tree view without clearing filesystem or search caches.
+(define (groot-collapse-all)
+  (groot-collapse-all-effects! *groot-state* groot-rebuild-tree! groot-request-redraw!))
 
 ;; Moves cached expansion state with a renamed directory.  The next refresh
 ;; drops listings, but expansion keys must retain their new identities so reveal

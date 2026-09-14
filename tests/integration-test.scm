@@ -1,5 +1,6 @@
 ;; Thin integration tests for component lifecycle, redraw, focus, and mouse routing.
 
+(require "../groot-core.scm")
 (require "../groot-integration.scm")
 (require "../groot-fs.scm")
 
@@ -86,6 +87,95 @@
                                      (lambda () (record! 'redraw)))
              'refreshed)
 (check-equal "search refresh rebuilds tree and results before redraw" effects '(tree search redraw))
+
+;; Collapse restores only transient tree-view state before rebuilding once.
+(define collapse-state-fields
+  '(root children expanded files search-ready? rows
+    query results result-count result-rows search-input?
+    pending-g? pending-z? jump-active? jump-input jump-alphabet cursor window height scroll-lines
+    active? focused? last-document))
+(define collapse-reset-fields
+  '(expanded query results result-count result-rows search-input?
+    pending-g? pending-z? jump-active? jump-input cursor window))
+(define collapse-preserved-fields
+  '(root children files search-ready? rows jump-alphabet height scroll-lines active? focused? last-document))
+(define (collapse-state-snapshot state fields)
+  (map (lambda (field) (list field (groot-state-ref state field #f))) fields))
+
+(define collapse-state (groot-state "/fixture" "asdf"))
+(define preserved-children (hash-insert (hash) "/fixture" '(child)))
+(define preserved-files '(/fixture/file.txt))
+(groot-state-set! collapse-state 'children preserved-children)
+(groot-state-set! collapse-state 'files preserved-files)
+(groot-state-set! collapse-state 'search-ready? #t)
+(groot-state-set! collapse-state 'rows '(cached-row))
+(groot-state-set! collapse-state 'expanded
+                  (hash-insert (hash-insert (hash) "/fixture" #t) "/fixture/nested" #t))
+(groot-state-set! collapse-state 'query "needle")
+(groot-state-set! collapse-state 'results '(match))
+(groot-state-set! collapse-state 'result-count 1)
+(groot-state-set! collapse-state 'result-rows #("match"))
+(groot-state-set! collapse-state 'search-input? #t)
+(groot-state-set! collapse-state 'pending-g? #t)
+(groot-state-set! collapse-state 'pending-z? #t)
+(groot-state-set! collapse-state 'jump-active? #t)
+(groot-state-set! collapse-state 'jump-input "a")
+(groot-state-set! collapse-state 'jump-alphabet "qwer")
+(groot-state-set! collapse-state 'cursor 9)
+(groot-state-set! collapse-state 'window 4)
+(groot-state-set! collapse-state 'height 42)
+(groot-state-set! collapse-state 'scroll-lines 8)
+(groot-state-set! collapse-state 'active? #t)
+(groot-state-set! collapse-state 'focused? #f)
+(groot-state-set! collapse-state 'last-document "/fixture/open.txt")
+(define collapse-preserved-before
+  (collapse-state-snapshot collapse-state collapse-preserved-fields))
+(define collapse-reset-state
+  (list (list 'expanded (hash-insert (hash) "/fixture" #f))
+        '(query "") '(results ()) '(result-count 0) '(result-rows #()) '(search-input? #f)
+        '(pending-g? #f) '(pending-z? #f) '(jump-active? #f) '(jump-input "") '(cursor 0) '(window 0)))
+(set! effects '())
+(check-equal "collapse resets the active tree view"
+             (groot-collapse-all-effects! collapse-state
+                                          (lambda ()
+                                            (check-equal "collapse resets state before rebuild"
+                                                         (collapse-state-snapshot collapse-state collapse-reset-fields)
+                                                         collapse-reset-state)
+                                            (record! 'rebuild))
+                                          (lambda () (record! 'redraw)))
+             'collapsed)
+(check-equal "collapse rebuilds once before one redraw" effects '(rebuild redraw))
+(check-equal "collapse preserves every unspecified state field"
+             (collapse-state-snapshot collapse-state collapse-preserved-fields)
+             collapse-preserved-before)
+
+(set! effects '())
+(check-equal "absent collapse is ignored"
+             (groot-collapse-all-effects! #f
+                                          (lambda () (record! 'rebuild))
+                                          (lambda () (record! 'redraw)))
+             'inactive)
+(check-equal "absent collapse has no effects" effects '())
+
+(define inactive-collapse-state (groot-state "/inactive" "asdf"))
+(for-each (lambda (field+value) (groot-state-set! inactive-collapse-state (car field+value) (cadr field+value)))
+          `((root "/other") (children ,preserved-children)
+            (expanded ,(hash-insert (hash) "/inactive/nested" #t)) (files ,preserved-files)
+            (search-ready? #t) (rows (cached-row))
+            (query "needle") (results (match)) (result-count 1) (result-rows #("match")) (search-input? #t)
+            (pending-g? #t) (pending-z? #t) (jump-active? #t) (jump-input "a") (jump-alphabet "qwer")
+            (cursor 7) (window 4) (height 42) (scroll-lines 8)
+            (active? #f) (focused? #f) (last-document "/inactive/open.txt")))
+(define inactive-collapse-before (collapse-state-snapshot inactive-collapse-state collapse-state-fields))
+(set! effects '())
+(check-equal "inactive collapse is ignored"
+             (groot-collapse-all-effects! inactive-collapse-state
+                                          (lambda () (record! 'rebuild))
+                                          (lambda () (record! 'redraw)))
+             'inactive)
+(check-equal "inactive collapse makes no mutation or effects"
+             (list (collapse-state-snapshot inactive-collapse-state collapse-state-fields) effects)
+             (list inactive-collapse-before '()))
 
 ;; Keep integration tests thin: one success path, one failure path, and dispatch ownership.
 (set! effects '())

@@ -6,6 +6,7 @@
 (require "groot-fs.scm")
 
 (provide groot-open-effects! groot-close-effects! groot-route-mouse! groot-refresh-effects!
+         groot-collapse-all-effects!
          groot-key-dispatch groot-created-file-effects! groot-created-entry-effects! groot-create-prompt-effects!
          groot-rename-prompt-effects! groot-renamed-entry-effects!
          groot-delete-target-label groot-delete-surviving-ancestors
@@ -42,6 +43,28 @@
         (when searching? (refresh-search!))
         (redraw!)
         'refreshed)))
+
+;; Restores active transient tree-view state before rebuilding the displayed rows.
+(define (groot-collapse-all-effects! state rebuild-tree! redraw!)
+  (if (or (not state) (not (groot-state-ref state 'active? #f)))
+      'inactive
+      (begin
+        (groot-state-set! state 'expanded
+                          (hash-insert (hash) (groot-state-ref state 'root #f) #f))
+        (groot-state-set! state 'query "")
+        (groot-state-set! state 'results '())
+        (groot-state-set! state 'result-count 0)
+        (groot-state-set! state 'result-rows #())
+        (groot-state-set! state 'search-input? #f)
+        (groot-state-set! state 'pending-g? #f)
+        (groot-state-set! state 'pending-z? #f)
+        (groot-state-set! state 'jump-active? #f)
+        (groot-state-set! state 'jump-input "")
+        (groot-state-set! state 'cursor 0)
+        (groot-state-set! state 'window 0)
+        (rebuild-tree!)
+        (redraw!)
+        'collapsed)))
 
 ;; Selects the top-level keyboard owner.  groot-handle-event uses this seam so
 ;; prompt availability cannot drift from the dispatch tested without Helix.

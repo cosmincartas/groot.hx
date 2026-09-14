@@ -71,6 +71,10 @@ the cost of hits the tree can display but search would no longer find.
 (keymap (global) (normal (space (g ":groot-open"))))
 ```
 
+## Commands
+
+Run `:groot-collapse-all` to exit search and restore the active explorer to its root view, with direct children visible and the cursor at the top. It leaves cached data intact and does nothing when Groot is closed.
+
 ## Keys
 
 `j`/`k` or arrows navigate; `gg` jumps to the top; `ge` or `G` jumps to the bottom; `zz` centers the selection; `gw` shows two-key labels for visible rows; `Enter` opens or toggles; `Tab` toggles; `/` starts search; `Backspace` edits it; `r` renames; `d` permanently deletes; `R` refreshes; `Esc` returns focus to the editor when no operation is active; `q` closes. `:` falls through to Helix's command prompt.
