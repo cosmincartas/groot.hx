@@ -109,4 +109,4 @@ There is no trash, undo/rollback, secure-erasure guarantee, or protection agains
 
 ## Mouse
 
-Click a visible row to focus Groot and select it. While focused, the mouse wheel scrolls Groot using Helix's `scroll-lines` setting. Clicking or scrolling outside the sidebar releases focus back to Helix.
+Click a visible row to focus Groot and select it. Drag the separator to resize the sidebar (minimum 20 cells); its requested width is retained while Helix runs and is clipped to the terminal. While focused, the mouse wheel scrolls Groot using Helix's `scroll-lines` setting. Clicking or scrolling outside the sidebar releases focus back to Helix.

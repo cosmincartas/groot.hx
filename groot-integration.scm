@@ -5,7 +5,7 @@
 (require "groot-core.scm")
 (require "groot-fs.scm")
 
-(provide groot-open-effects! groot-close-effects! groot-route-mouse! groot-refresh-effects!
+(provide groot-open-effects! groot-close-effects! groot-route-mouse! groot-resized-width groot-refresh-effects!
          groot-collapse-all-effects!
          groot-key-dispatch groot-created-file-effects! groot-created-entry-effects! groot-create-prompt-effects!
          groot-rename-prompt-effects! groot-renamed-entry-effects!
@@ -22,12 +22,21 @@
   (unmount!)
   (schedule-cleanup!))
 
-;; Routes a normalized mouse kind and returns 'consume, 'ignore, or 'unhandled.
-(define (groot-route-mouse! kind inside? focused? set-focus! select! scroll!)
+;; Converts a separator column to the persistent requested pane width.
+(define (groot-resized-width side terminal-width column)
+  (max 20 (if (equal? side 'right) (- terminal-width column) (+ column 1))))
+
+;; Routes normalized mouse input, retaining separator drag capture until release.
+(define (groot-route-mouse! kind inside? separator? focused? resizing?
+                            set-focus! set-resizing! select! scroll! resize!)
   (cond [(equal? kind 'left)
-         (if inside?
-             (begin (set-focus! #t) (select!) 'consume)
-             (begin (set-focus! #f) 'ignore))]
+         (cond [separator? (set-focus! #t) (set-resizing! #t) 'consume]
+               [inside? (set-focus! #t) (select!) 'consume]
+               [else (set-focus! #f) 'ignore])]
+        [(equal? kind 'drag)
+         (if resizing? (begin (resize!) 'consume) 'unhandled)]
+        [(equal? kind 'release)
+         (if resizing? (begin (set-resizing! #f) 'consume) 'unhandled)]
         [(or (equal? kind 'up) (equal? kind 'down))
          (if inside?
              (begin (when focused? (scroll! kind)) 'consume)

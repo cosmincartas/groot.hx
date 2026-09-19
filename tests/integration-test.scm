@@ -27,37 +27,92 @@
 
 (set! effects '())
 (check-equal "inside click is consumed"
-             (groot-route-mouse! 'left #t #f
+             (groot-route-mouse! 'left #t #f #f #f
                                  (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
                                  (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll)))
+                                 (lambda (_) (record! 'scroll))
+                                 (lambda () (record! 'resize)))
              'consume)
 (check-equal "inside click focuses and selects" effects '((focus #t) select))
 
 (set! effects '())
-(check-equal "outside click returns control to Helix"
-             (groot-route-mouse! 'left #f #t
+(check-equal "separator drag captures and resizes"
+             (groot-route-mouse! 'left #t #t #f #f
                                  (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
                                  (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll)))
+                                 (lambda (_) (record! 'scroll))
+                                 (lambda () (record! 'resize)))
+             'consume)
+(check-equal "separator drag focuses without selecting a row" effects '((focus #t) (resizing #t)))
+
+(set! effects '())
+(check-equal "captured drag resizes outside the sidebar"
+             (groot-route-mouse! 'drag #f #f #t #t
+                                 (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
+                                 (lambda () (record! 'select))
+                                 (lambda (_) (record! 'scroll))
+                                 (lambda () (record! 'resize)))
+             'consume)
+(check-equal "captured outside drag only resizes" effects '(resize))
+
+(set! effects '())
+(check-equal "release ends captured drag"
+             (groot-route-mouse! 'release #f #f #t #t
+                                 (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
+                                 (lambda () (record! 'select))
+                                 (lambda (_) (record! 'scroll))
+                                 (lambda () (record! 'resize)))
+             'consume)
+(check-equal "release clears drag capture" effects '((resizing #f)))
+(set! effects '())
+(check-equal "drag after release is ignored"
+             (groot-route-mouse! 'drag #f #f #t #f
+                                 (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
+                                 (lambda () (record! 'select))
+                                 (lambda (_) (record! 'scroll))
+                                 (lambda () (record! 'resize)))
+             'unhandled)
+(check-equal "drag after release has no resize effect" effects '())
+(check-equal "left separator grows toward the right" (groot-resized-width 'left 100 49) 50)
+(check-equal "right separator grows toward the left" (groot-resized-width 'right 100 50) 50)
+(check-equal "requested width clamps at twenty cells" (groot-resized-width 'left 100 0) 20)
+(check-equal "right requested width clamps at twenty cells" (groot-resized-width 'right 100 99) 20)
+
+(set! effects '())
+(check-equal "outside click returns control to Helix"
+             (groot-route-mouse! 'left #f #f #t #f
+                                 (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
+                                 (lambda () (record! 'select))
+                                 (lambda (_) (record! 'scroll))
+                                 (lambda () (record! 'resize)))
              'ignore)
 (check-equal "outside click releases focus" effects '((focus #f)))
 
 (set! effects '())
 (check-equal "focused wheel is consumed"
-             (groot-route-mouse! 'up #t #t
+             (groot-route-mouse! 'up #t #f #t #f
                                  (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
                                  (lambda () (record! 'select))
-                                 (lambda (direction) (record! (list 'scroll direction))))
+                                 (lambda (direction) (record! (list 'scroll direction)))
+                                 (lambda () (record! 'resize)))
              'consume)
 (check-equal "focused wheel scrolls the tree" effects '((scroll up)))
 
 (set! effects '())
 (check-equal "unfocused wheel is consumed without scrolling"
-             (groot-route-mouse! 'down #t #f
+             (groot-route-mouse! 'down #t #f #f #f
                                  (lambda (focused?) (record! (list 'focus focused?)))
+                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
                                  (lambda () (record! 'select))
-                                 (lambda (direction) (record! (list 'scroll direction))))
+                                 (lambda (direction) (record! (list 'scroll direction)))
+                                 (lambda () (record! 'resize)))
              'consume)
 (check-equal "unfocused wheel has no side effect" effects '())
 

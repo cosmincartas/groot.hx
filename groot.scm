@@ -42,6 +42,11 @@
 (define *groot-last-rect* #f)
 ;; Terminal mouse kind emitted for a left-button press.
 (define *groot-mouse-left-down* 0)
+;; Terminal mouse kinds emitted while dragging or releasing the left button.
+(define *groot-mouse-left-up* 3)
+(define *groot-mouse-left-drag* 6)
+;; True from a separator press until its left-button release.
+(define *groot-resizing?* #f)
 ;; Terminal mouse kind emitted for a downward wheel tick.
 (define *groot-mouse-scroll-down* 10)
 ;; Terminal mouse kind emitted for an upward wheel tick.
@@ -465,20 +470,31 @@
                                                      (groot-active-count)
                                                      (groot-get 'height 1))))
 
+;; Returns the rendered width, keeping a persistent requested width within the terminal.
+(define (groot-effective-width rect) (min *groot-width* (area-width rect)))
+
 ;; Returns the panel's left edge for the current side and terminal area.
 (define (groot-panel-x0 rect)
-  (define width (min *groot-width* (area-width rect)))
+  (define width (groot-effective-width rect))
   (if (equal? *groot-side* 'right) (- (area-width rect) width) 0))
 
 ;; Reports whether a mouse event lands within the sidebar rectangle.
 (define (groot-mouse-inside? rect event)
   (and rect (mouse-event? event)
-       (let* ([width (min *groot-width* (area-width rect))]
+       (let* ([width (groot-effective-width rect)]
               [x0 (groot-panel-x0 rect)]
               [row (event-mouse-row event)]
               [col (event-mouse-col event)])
          (and row col (>= row 0) (< row (area-height rect))
               (>= col x0) (< col (+ x0 width))))))
+
+;; Reports whether a press lands on the rendered separator column.
+(define (groot-mouse-on-separator? rect event)
+  (and (groot-mouse-inside? rect event)
+       (= (event-mouse-col event)
+          (if (equal? *groot-side* 'right)
+              (groot-panel-x0 rect)
+              (+ (groot-panel-x0 rect) (- (groot-effective-width rect) 1))))))
 
 ;; Converts a click row into an active item index, excluding the title row.
 (define (groot-mouse-row-index event)
@@ -510,6 +526,8 @@
       #f
       (let* ([raw-kind (event-mouse-kind event)]
              [kind (cond [(equal? raw-kind *groot-mouse-left-down*) 'left]
+                         [(equal? raw-kind *groot-mouse-left-drag*) 'drag]
+                         [(equal? raw-kind *groot-mouse-left-up*) 'release]
                          [(equal? raw-kind *groot-mouse-scroll-up*) 'up]
                          [(equal? raw-kind *groot-mouse-scroll-down*) 'down]
                          [else 'other])]
@@ -517,10 +535,19 @@
               (groot-route-mouse!
                kind
                (groot-mouse-inside? *groot-last-rect* event)
+               (groot-mouse-on-separator? *groot-last-rect* event)
                (groot-get 'focused? #f)
+               *groot-resizing?*
                (lambda (focused?) (groot-put! 'focused? focused?))
+               (lambda (resizing?) (set! *groot-resizing?* resizing?))
                (lambda () (groot-select-mouse-row! event))
-               groot-scroll!)])
+               groot-scroll!
+               (lambda ()
+                 (set! *groot-width*
+                       (groot-resized-width *groot-side*
+                                            (area-width *groot-last-rect*)
+                                            (event-mouse-col event)))
+                 (groot-request-redraw!)))])
         (cond [(equal? result 'consume) event-result/consume]
               [(equal? result 'ignore) event-result/ignore]
               [else #f]))))
@@ -724,6 +751,7 @@
 
 ;; Closes the component and releases the editor clipping owned by this sidebar.
 (define (groot-close!)
+  (set! *groot-resizing?* #f)
   (groot-put! 'active? #f)
   (groot-put! 'focused? #f)
   (groot-close-effects!
@@ -794,7 +822,7 @@
 ;; Renders the sidebar and records the terminal geometry for input handling.
 (define (groot-render state rect frame)
   (set! *groot-last-rect* rect)
-  (define width (min *groot-width* (area-width rect)))
+  (define width (groot-effective-width rect))
   (define height (area-height rect))
   (define x0 (if (equal? *groot-side* 'right) (- (area-width rect) width) 0))
   ;; The separator owns one column, keeping panel text out of the editor area.
