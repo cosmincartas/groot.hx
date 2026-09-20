@@ -3,20 +3,31 @@
 (require "../groot-core.scm")
 (require "../groot-integration.scm")
 (require "../groot-fs.scm")
-
-;; Fails the Steel process with an actionable assertion message.
-(define (check-equal name actual expected)
-  (unless (equal? actual expected)
-    (error (string-append name "\n expected: " (to-string expected) "\n actual: " (to-string actual)))))
+(require "harness.scm")
 
 ;; Records dependency-injected effects without loading Helix.
 (define effects '())
 (define (record! effect) (set! effects (append effects (list effect))))
 
+;; Mouse host recording every effect; scroll records its direction.
+(define mouse-host
+  (GrootMouseHost (lambda (focused?) (record! (list 'focus focused?)))
+                  (lambda (resizing?) (record! (list 'resizing resizing?)))
+                  (lambda () (record! 'select))
+                  (lambda (direction) (record! (list 'scroll direction)))
+                  (lambda () (record! 'resize))))
+
 ;; Creation reveal must not replace the document path used by the next sync.
 (define last-document #f)
 (define (get-last-document) last-document)
 (define (set-last-document! path) (set! last-document path))
+
+;; Display host whose error reporting and document bookkeeping are recorded.
+(define (test-host refresh-tree! reveal! redraw!)
+  (GrootHost refresh-tree! reveal! redraw!
+             (lambda (message) (record! (list 'error message)))
+             get-last-document set-last-document!
+             #f #f #f))
 
 (groot-open-effects! (lambda () (record! 'mount)) (lambda () (record! 'redraw)))
 (check-equal "opening mounts before requesting redraw" effects '(mount redraw))
@@ -27,55 +38,30 @@
 
 (set! effects '())
 (check-equal "inside click is consumed"
-             (groot-route-mouse! 'left #t #f #f #f
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'left #t #f #f #f)
              'consume)
 (check-equal "inside click focuses and selects" effects '((focus #t) select))
 
 (set! effects '())
 (check-equal "separator drag captures and resizes"
-             (groot-route-mouse! 'left #t #t #f #f
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'left #t #t #f #f)
              'consume)
 (check-equal "separator drag focuses without selecting a row" effects '((focus #t) (resizing #t)))
 
 (set! effects '())
 (check-equal "captured drag resizes outside the sidebar"
-             (groot-route-mouse! 'drag #f #f #t #t
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'drag #f #f #t #t)
              'consume)
 (check-equal "captured outside drag only resizes" effects '(resize))
 
 (set! effects '())
 (check-equal "release ends captured drag"
-             (groot-route-mouse! 'release #f #f #t #t
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'release #f #f #t #t)
              'consume)
 (check-equal "release clears drag capture" effects '((resizing #f)))
 (set! effects '())
 (check-equal "drag after release is ignored"
-             (groot-route-mouse! 'drag #f #f #t #f
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'drag #f #f #t #f)
              'unhandled)
 (check-equal "drag after release has no resize effect" effects '())
 (check-equal "left separator grows toward the right" (groot-resized-width 'left 100 49) 50)
@@ -85,34 +71,19 @@
 
 (set! effects '())
 (check-equal "outside click returns control to Helix"
-             (groot-route-mouse! 'left #f #f #t #f
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (_) (record! 'scroll))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'left #f #f #t #f)
              'ignore)
 (check-equal "outside click releases focus" effects '((focus #f)))
 
 (set! effects '())
 (check-equal "focused wheel is consumed"
-             (groot-route-mouse! 'up #t #f #t #f
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (direction) (record! (list 'scroll direction)))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'up #t #f #t #f)
              'consume)
 (check-equal "focused wheel scrolls the tree" effects '((scroll up)))
 
 (set! effects '())
 (check-equal "unfocused wheel is consumed without scrolling"
-             (groot-route-mouse! 'down #t #f #f #f
-                                 (lambda (focused?) (record! (list 'focus focused?)))
-                                 (lambda (resizing?) (record! (list 'resizing resizing?)))
-                                 (lambda () (record! 'select))
-                                 (lambda (direction) (record! (list 'scroll direction)))
-                                 (lambda () (record! 'resize)))
+             (groot-route-mouse! mouse-host 'down #t #f #f #f)
              'consume)
 (check-equal "unfocused wheel has no side effect" effects '())
 
@@ -144,49 +115,64 @@
 (check-equal "search refresh rebuilds tree and results before redraw" effects '(tree search redraw))
 
 ;; Collapse restores only transient tree-view state before rebuilding once.
-(define collapse-state-fields
-  '(root children expanded files search-ready? rows
-    query results result-count result-rows search-input?
-    pending-g? pending-z? jump-active? jump-input jump-alphabet cursor window height scroll-lines
-    active? focused? last-document))
+;; Each field is a (name getter setter) triple so the snapshot helpers stay
+;; data-driven without a symbol-keyed state boundary.
+(define-syntax field
+  (syntax-rules ()
+    [(_ name getter setter) (list 'name getter setter)]))
+(define all-fields
+  (list (field root groot-state-root set-groot-state-root!)
+        (field children groot-state-children set-groot-state-children!)
+        (field expanded groot-state-expanded set-groot-state-expanded!)
+        (field files groot-state-files set-groot-state-files!)
+        (field search-ready? groot-state-search-ready? set-groot-state-search-ready!)
+        (field rows groot-state-rows set-groot-state-rows!)
+        (field ignored groot-state-ignored set-groot-state-ignored!)
+        (field query groot-state-query set-groot-state-query!)
+        (field results groot-state-results set-groot-state-results!)
+        (field result-count groot-state-result-count set-groot-state-result-count!)
+        (field result-rows groot-state-result-rows set-groot-state-result-rows!)
+        (field search-input? groot-state-search-input? set-groot-state-search-input!)
+        (field pending-g? groot-state-pending-g? set-groot-state-pending-g!)
+        (field pending-z? groot-state-pending-z? set-groot-state-pending-z!)
+        (field jump-active? groot-state-jump-active? set-groot-state-jump-active!)
+        (field jump-input groot-state-jump-input set-groot-state-jump-input!)
+        (field jump-alphabet groot-state-jump-alphabet set-groot-state-jump-alphabet!)
+        (field cursor groot-state-cursor set-groot-state-cursor!)
+        (field window groot-state-window set-groot-state-window!)
+        (field height groot-state-height set-groot-state-height!)
+        (field scroll-lines groot-state-scroll-lines set-groot-state-scroll-lines!)
+        (field active? groot-state-active? set-groot-state-active!)
+        (field focused? groot-state-focused? set-groot-state-focused!)
+        (field last-document groot-state-last-document set-groot-state-last-document!)))
+(define (fields-named names)
+  (filter (lambda (f) (member (car f) names)) all-fields))
+(define (field-named name) (car (fields-named (list name))))
+(define (state-put! state name value) ((caddr (field-named name)) state value))
 (define collapse-reset-fields
-  '(expanded query results result-count result-rows search-input?
-    pending-g? pending-z? jump-active? jump-input cursor window))
+  (fields-named '(expanded query results result-count result-rows search-input?
+                  pending-g? pending-z? jump-active? jump-input cursor window)))
 (define collapse-preserved-fields
-  '(root children files search-ready? rows jump-alphabet height scroll-lines active? focused? last-document))
+  (fields-named '(root children files search-ready? rows ignored jump-alphabet height scroll-lines
+                  active? focused? last-document)))
 (define (collapse-state-snapshot state fields)
-  (map (lambda (field) (list field (groot-state-ref state field #f))) fields))
+  (map (lambda (f) (list (car f) ((cadr f) state))) fields))
 
 (define collapse-state (groot-state "/fixture" "asdf"))
 (define preserved-children (hash-insert (hash) "/fixture" '(child)))
 (define preserved-files '(/fixture/file.txt))
-(groot-state-set! collapse-state 'children preserved-children)
-(groot-state-set! collapse-state 'files preserved-files)
-(groot-state-set! collapse-state 'search-ready? #t)
-(groot-state-set! collapse-state 'rows '(cached-row))
-(groot-state-set! collapse-state 'expanded
-                  (hash-insert (hash-insert (hash) "/fixture" #t) "/fixture/nested" #t))
-(groot-state-set! collapse-state 'query "needle")
-(groot-state-set! collapse-state 'results '(match))
-(groot-state-set! collapse-state 'result-count 1)
-(groot-state-set! collapse-state 'result-rows #("match"))
-(groot-state-set! collapse-state 'search-input? #t)
-(groot-state-set! collapse-state 'pending-g? #t)
-(groot-state-set! collapse-state 'pending-z? #t)
-(groot-state-set! collapse-state 'jump-active? #t)
-(groot-state-set! collapse-state 'jump-input "a")
-(groot-state-set! collapse-state 'jump-alphabet "qwer")
-(groot-state-set! collapse-state 'cursor 9)
-(groot-state-set! collapse-state 'window 4)
-(groot-state-set! collapse-state 'height 42)
-(groot-state-set! collapse-state 'scroll-lines 8)
-(groot-state-set! collapse-state 'active? #t)
-(groot-state-set! collapse-state 'focused? #f)
-(groot-state-set! collapse-state 'last-document "/fixture/open.txt")
+(for-each (lambda (name+value) (state-put! collapse-state (car name+value) (cadr name+value)))
+          `((children ,preserved-children) (files ,preserved-files) (search-ready? #t)
+            (rows (cached-row))
+            (expanded ,(hash-insert (hash-insert (hash) "/fixture" #t) "/fixture/nested" #t))
+            (query "needle") (results (match)) (result-count 1) (result-rows #("match"))
+            (search-input? #t) (pending-g? #t) (pending-z? #t) (jump-active? #t) (jump-input "a")
+            (jump-alphabet "qwer") (cursor 9) (window 4) (height 42) (scroll-lines 8)
+            (active? #t) (focused? #f) (last-document "/fixture/open.txt")))
 (define collapse-preserved-before
   (collapse-state-snapshot collapse-state collapse-preserved-fields))
 (define collapse-reset-state
-  (list (list 'expanded (hash-insert (hash) "/fixture" #f))
+  (list (list 'expanded (hash-insert (hash) "/fixture" #t))
         '(query "") '(results ()) '(result-count 0) '(result-rows #()) '(search-input? #f)
         '(pending-g? #f) '(pending-z? #f) '(jump-active? #f) '(jump-input "") '(cursor 0) '(window 0)))
 (set! effects '())
@@ -213,7 +199,7 @@
 (check-equal "absent collapse has no effects" effects '())
 
 (define inactive-collapse-state (groot-state "/inactive" "asdf"))
-(for-each (lambda (field+value) (groot-state-set! inactive-collapse-state (car field+value) (cadr field+value)))
+(for-each (lambda (name+value) (state-put! inactive-collapse-state (car name+value) (cadr name+value)))
           `((root "/other") (children ,preserved-children)
             (expanded ,(hash-insert (hash) "/inactive/nested" #t)) (files ,preserved-files)
             (search-ready? #t) (rows (cached-row))
@@ -221,7 +207,7 @@
             (pending-g? #t) (pending-z? #t) (jump-active? #t) (jump-input "a") (jump-alphabet "qwer")
             (cursor 7) (window 4) (height 42) (scroll-lines 8)
             (active? #f) (focused? #f) (last-document "/inactive/open.txt")))
-(define inactive-collapse-before (collapse-state-snapshot inactive-collapse-state collapse-state-fields))
+(define inactive-collapse-before (collapse-state-snapshot inactive-collapse-state all-fields))
 (set! effects '())
 (check-equal "inactive collapse is ignored"
              (groot-collapse-all-effects! inactive-collapse-state
@@ -229,38 +215,22 @@
                                           (lambda () (record! 'redraw)))
              'inactive)
 (check-equal "inactive collapse makes no mutation or effects"
-             (list (collapse-state-snapshot inactive-collapse-state collapse-state-fields) effects)
+             (list (collapse-state-snapshot inactive-collapse-state all-fields) effects)
              (list inactive-collapse-before '()))
 
 ;; Keep integration tests thin: one success path, one failure path, and dispatch ownership.
 (set! effects '())
 (set! last-document "/fixture/open.txt")
 (check-equal "created file refreshes selects and redraws"
-             (groot-created-file-effects!
-              "/fixture/nested/new.txt"
-              (lambda () (record! 'refresh))
-              (lambda (path) (set-last-document! path) (record! (list 'select path)) #t)
-              (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+             (groot-created-entry-effects!
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (path) (set-last-document! path) (record! (list 'select path)) #t)
+                         (lambda () (record! 'redraw)))
+              (GrootFsCreateResult 'success "/fixture/nested/new.txt" #f #t)
+              (lambda (_) #f))
              'revealed)
 (check-equal "created file preserves document bookkeeping" last-document "/fixture/open.txt")
 (check-equal "created file display effect order" effects '(refresh (select "/fixture/nested/new.txt") redraw))
-
-(set! effects '())
-(check-equal "missing created row reports and redraws"
-             (groot-created-file-effects!
-              "/fixture/missing.txt" (lambda () (record! 'refresh))
-              (lambda (path) (record! (list 'reveal path)) #f)
-              (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
-             'display-failed)
-(check-equal "missing created row effects"
-             effects
-             '(refresh (reveal "/fixture/missing.txt")
-               (error "File was created at /fixture/missing.txt, but the tree could not display it.")
-               redraw))
 
 ;; Created directories are collapsed before refresh, so a removed and recreated
 ;; path cannot inherit expansion state from its prior identity.
@@ -269,13 +239,11 @@
   (GrootFsCreateResult 'success "/fixture/recreated" #f #t))
 (check-equal "created entry collapses then refreshes reveals and redraws"
              (groot-created-entry-effects!
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (path) (record! (list 'select path)) #t)
+                         (lambda () (record! 'redraw)))
               created-directory
-              (lambda (path) (record! (list 'collapse path)))
-              (lambda () (record! 'refresh))
-              (lambda (path) (record! (list 'select path)) #t)
-              (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+              (lambda (path) (record! (list 'collapse path))))
              'revealed)
 (check-equal "created entry collapse happens before display refresh"
              effects
@@ -284,13 +252,11 @@
 (set! effects '())
 (check-equal "created-entry display failure preserves filesystem success"
              (groot-created-entry-effects!
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (path) (record! (list 'reveal path)) #f)
+                         (lambda () (record! 'redraw)))
               created-directory
-              (lambda (path) (record! (list 'collapse path)))
-              (lambda () (record! 'refresh))
-              (lambda (path) (record! (list 'reveal path)) #f)
-              (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+              (lambda (path) (record! (list 'collapse path))))
              'display-failed)
 (check-equal "created-entry display failure does not compensate"
              effects
@@ -300,13 +266,11 @@
 (set! effects '())
 (check-equal "created-entry filesystem failure only reports its outcome"
              (groot-created-entry-effects!
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (path) (record! (list 'reveal path)) #t)
+                         (lambda () (record! 'redraw)))
               (GrootFsCreateResult 'native-failure "/fixture/uncertain" "native failed" #f)
-              (lambda (path) (record! (list 'collapse path)))
-              (lambda () (record! 'refresh))
-              (lambda (path) (record! (list 'reveal path)) #t)
-              (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+              (lambda (path) (record! (list 'collapse path))))
              'native-failure)
 (check-equal "mutation-free filesystem failure has no display effects"
              effects
@@ -315,13 +279,11 @@
 (set! effects '())
 (check-equal "rejected creation reports feedback without display or compensation effects"
              (groot-created-entry-effects!
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (path) (record! (list 'reveal path)) #t)
+                         (lambda () (record! 'redraw)))
               (GrootFsCreateResult 'rejected "/fixture/rejected" "unsafe component" #f)
-              (lambda (path) (record! (list 'collapse path)))
-              (lambda () (record! 'refresh))
-              (lambda (path) (record! (list 'reveal path)) #t)
-              (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+              (lambda (path) (record! (list 'collapse path))))
              'rejected)
 (check-equal "rejected creation only emits actionable feedback"
              effects
@@ -335,13 +297,11 @@
    (set! effects '())
    (check-equal "created-entry display exceptions are reported"
                 (groot-created-entry-effects!
-                 created-file
-                 (lambda (_) (record! 'collapse))
-                 (lambda () (record! 'refresh) (when (equal? phase 'refresh) (error "refresh failed")))
-                 (lambda (_) (record! 'reveal) (when (equal? phase 'reveal) (error "reveal failed")) #t)
-                 (lambda () (record! 'redraw) (when (equal? phase 'redraw) (error "redraw failed")))
-                 (lambda (message) (record! (list 'error message)))
-                 (lambda () last-document) (lambda (path) (set! last-document path)))
+              (test-host (lambda () (record! 'refresh) (when (equal? phase 'refresh) (error "refresh failed")))
+                         (lambda (_) (record! 'reveal) (when (equal? phase 'reveal) (error "reveal failed")) #t)
+                         (lambda () (record! 'redraw) (when (equal? phase 'redraw) (error "redraw failed"))))
+              created-file
+              (lambda (_) (record! 'collapse)))
                 'display-failed)
    (check-equal "created-entry display exceptions still redraw"
                 (length (filter (lambda (effect) (equal? effect 'redraw)) effects)) 1)
@@ -353,10 +313,11 @@
 (set! effects '())
 (check-equal "created-entry collapse exception remains display recovery"
              (groot-created-entry-effects!
-              created-file (lambda (_) (error "collapse failed"))
-              (lambda () (record! 'refresh)) (lambda (_) (record! 'reveal) #t)
-              (lambda () (record! 'redraw)) (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (_) (record! 'reveal) #t)
+                         (lambda () (record! 'redraw)))
+              created-file
+              (lambda (_) (error "collapse failed")))
              'display-failed)
 (check-equal "collapse exception still refreshes and redraws"
              (filter (lambda (effect) (or (equal? effect 'refresh) (equal? effect 'redraw))) effects)
@@ -366,11 +327,11 @@
 (set! effects '())
 (check-equal "partial creation refreshes and redraws"
              (groot-created-entry-effects!
+              (test-host (lambda () (record! 'refresh))
+                         (lambda (_) (record! 'reveal) #t)
+                         (lambda () (record! 'redraw)))
               (GrootFsCreateResult 'partial-failure "/fixture/parent/file" "verify failed" #t)
-              (lambda (_) (record! 'collapse)) (lambda () (record! 'refresh))
-              (lambda (_) (record! 'reveal) #t) (lambda () (record! 'redraw))
-              (lambda (message) (record! (list 'error message)))
-              (lambda () last-document) (lambda (path) (set! last-document path)))
+              (lambda (_) (record! 'collapse)))
              'partial-failure)
 (check-equal "partial creation skips reveal after refresh" (car effects) 'refresh)
 
@@ -380,35 +341,70 @@
 (define captured-context '(captured destination))
 (define captured-submit #f)
 (groot-create-prompt-effects!
- captured-context "Create in /fixture:"
- (lambda (label callback) (list label callback))
- (lambda (component)
+ (GrootHost #f #f #f (lambda (message) (record! (list 'error message))) #f #f
+            (lambda (label callback) (list label callback))
+            (lambda (component)
    (record! (car component))
-   ((cadr component) "nested/file"))
+   ((cadr component) "nested/file")) #f)
+ captured-context "Create in /fixture:"
  (lambda (context submitted)
    (set! captured-submit (list context submitted))
    'result)
- (lambda (result) (record! result))
- (lambda (message) (record! (list 'error message))))
+ (lambda (result) (record! result)))
 (check-equal "create prompt submits the captured destination context once"
              (list captured-submit effects)
              '(((captured destination) "nested/file") ("Create in /fixture:" result)))
 
-(check-equal "ordinary focused tree a creates"
-             (groot-key-dispatch #t #f #f #f #f #f #\a) 'create)
-(check-equal "search input a remains query text"
-             (groot-key-dispatch #t #f #t #t #f #f #\a) 'search-input)
-(check-equal "ordinary focused tree r renames"
-             (groot-key-dispatch #t #f #f #f #f #f #\r) 'rename)
-(check-equal "ordinary focused tree d deletes"
-             (groot-key-dispatch #t #f #f #f #f #f #\d) 'delete)
-(check-equal "search result d never deletes"
-             (groot-key-dispatch #t #f #f #t #f #f #\d) 'normal)
-(check-equal "escape focuses the editor only from idle tree navigation"
-             (list (groot-key-dispatch #t #f #f #f #f #f 'escape)
-                   (groot-key-dispatch #t #f #f #f #t #f 'escape)
-                   (groot-key-dispatch #t #f #f #t #f #f 'escape)
-                   (groot-key-dispatch #t #t #f #f #f #f 'escape))
-             '(focus-editor normal normal jump))
+;; Every documented key, per mode.  Columns: key, idle tree, pending g,
+;; pending z, search results (query set, input closed).
+(define (dispatch-in mode key)
+  (cond [(equal? mode 'idle) (groot-key-dispatch #t #f #f #f #f #f key)]
+        [(equal? mode 'pending-g) (groot-key-dispatch #t #f #f #f #t #f key)]
+        [(equal? mode 'pending-z) (groot-key-dispatch #t #f #f #f #f #t key)]
+        [(equal? mode 'results) (groot-key-dispatch #t #f #f #t #f #f key)]))
+(define dispatch-table
+  (list
+   ;; key      idle            pending-g      pending-z      results
+   (list #\j    'move-down      'move-down     'move-down     'move-down)
+   (list 'down  'move-down      'move-down     'move-down     'move-down)
+   (list #\k    'move-up        'move-up       'move-up       'move-up)
+   (list 'up    'move-up        'move-up       'move-up       'move-up)
+   (list #\g    'pending-g      'move-top      'pending-g     'pending-g)
+   (list #\e    'clear          'move-bottom   'clear         'clear)
+   (list #\G    'move-bottom    'move-bottom   'move-bottom   'move-bottom)
+   (list #\z    'pending-z      'pending-z     'center        'pending-z)
+   (list #\w    'clear          'jump-start    'clear         'clear)
+   (list 'enter 'activate       'activate      'activate      'activate)
+   (list 'tab   'toggle         'toggle        'toggle        'toggle)
+   (list #\/    'search-start   'search-start  'search-start  'search-start)
+   (list 'backspace 'clear      'clear         'clear         'clear)
+   (list #\a    'create         'create        'create        'clear)
+   (list #\r    'rename         'rename        'rename        'clear)
+   (list #\d    'delete         'delete        'delete        'clear)
+   (list #\R    'refresh        'refresh       'refresh       'refresh)
+   (list 'escape 'focus-editor  'clear         'clear         'clear)
+   (list #\q    'close          'close         'close         'close)
+   (list #\:    'command-prompt 'command-prompt 'command-prompt 'command-prompt)
+   (list #\x    'clear          'clear         'clear         'clear)))
+(for-each
+ (lambda (row)
+   (define key (car row))
+   (check-equal (string-append "dispatch table: " (to-string key))
+                (map (lambda (mode) (dispatch-in mode key)) '(idle pending-g pending-z results))
+                (cdr row)))
+ dispatch-table)
 
-(displayln "groot integration tests passed")
+;; Mode precedence: focus, then jump labels, then the open search input.
+(check-equal "unfocused explorer ignores every key"
+             (map (lambda (key) (groot-key-dispatch #f #f #f #f #f #f key)) (list #\j 'escape #\q))
+             '(ignore ignore ignore))
+(check-equal "jump labels own every key, including a search input underneath"
+             (map (lambda (key) (groot-key-dispatch #t #t #t #t #f #f key)) (list #\a 'escape 'enter))
+             '(jump jump jump))
+(check-equal "an open search input owns text, escape, enter, and backspace"
+             (map (lambda (key) (groot-key-dispatch #t #f #t #t #t #f key))
+                  (list #\a #\q #\: 'escape 'enter 'backspace 'tab 'down))
+             '(search-type search-type search-type search-leave search-leave search-backspace
+               consume consume))
+
+(displayln "groot integration tests finished")
