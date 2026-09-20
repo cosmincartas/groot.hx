@@ -1,11 +1,10 @@
-;; Standalone unit tests for all pure groot-core behavior.
+;; Standalone unit tests for the pure core, path, prompt, and view modules.
 
 (require "../groot-core.scm")
-
-;; Fails the Steel process with an actionable assertion message.
-(define (check-equal name actual expected)
-  (unless (equal? actual expected)
-    (error (string-append name "\n expected: " (to-string expected) "\n actual: " (to-string actual)))))
+(require "../groot-path.scm")
+(require "../groot-prompt.scm")
+(require "../groot-view.scm")
+(require "harness.scm")
 
 ;; Entry classification and deterministic directory-first sorting.
 (define entries (list (groot-entry "/r/z" "z" 'file)
@@ -49,8 +48,16 @@
                    (GrootNavigationState? (GrootState-navigation state))
                    (GrootLifecycleState? (GrootState-lifecycle state)))
              '(#t #t #t #t #t))
-(groot-state-set! state 'cursor 7)
-(check-equal "typed state fields are mutable" (groot-state-ref state 'cursor 0) 7)
+(set-groot-state-cursor! state 7)
+(check-equal "typed state fields are mutable" (groot-state-cursor state) 7)
+(check-equal "a new session expands only its root"
+             (list (groot-expanded? state "/repo") (groot-expanded? state "/repo/src"))
+             '(#t #f))
+(groot-set-expanded! state "/repo/src" #t)
+(groot-set-expanded! state "/repo" #f)
+(check-equal "expansion toggles by path presence"
+             (list (groot-expanded? state "/repo") (groot-expanded? state "/repo/src"))
+             '(#f #t))
 
 ;; Component-aware workspace containment.
 (check-equal "descendant path is inside" (groot-path-inside? "/repo" "/repo/src/a.scm" "/") #t)
@@ -86,7 +93,7 @@
              "Rename …m:")
 (check-equal "narrow all-Unicode rename labels stay bounded"
              (list (groot-rename-prompt-label "😀😀" 22)
-                   (groot-create-prompt-remaining-input
+                   (groot-prompt-remaining-input
                     22 (groot-rename-prompt-label "😀😀" 22)))
              '("Rename …:" 9))
 ;; Rename labels use the same UTF-8 byte and display-cell safeguards as create
@@ -95,9 +102,9 @@
   (groot-rename-prompt-label "😀😀😀.scm" 30))
 (check-equal "narrow emoji rename label leaves usable native input"
              (list narrow-rename-emoji-label
-                   (groot-create-prompt-host-byte-width narrow-rename-emoji-label)
-                   (groot-create-prompt-cell-width narrow-rename-emoji-label)
-                   (groot-create-prompt-remaining-input 30 narrow-rename-emoji-label))
+                   (groot-prompt-host-byte-width narrow-rename-emoji-label)
+                   (groot-prompt-cell-width narrow-rename-emoji-label)
+                   (groot-prompt-remaining-input 30 narrow-rename-emoji-label))
              '("Rename …😀.scm:" 19 16 9))
 
 ;; A rename destination is a lexical sibling and does not reinterpret its name.
@@ -145,9 +152,9 @@
 ;; Prompt labels use the actual viewport width, reserve the native prompt's
 ;; right margin and a usable filename editor, and fall back to one cell safely.
 (check-equal "create prompt budgets derive from narrow and wide live widths"
-             (list (groot-create-prompt-label-budget 22)
-                   (groot-create-prompt-label-budget 80)
-                   (groot-create-prompt-label-budget 0))
+             (list (groot-prompt-filename-label-budget 22)
+                   (groot-prompt-filename-label-budget 80)
+                   (groot-prompt-filename-label-budget 0))
              '(12 70 1))
 (check-equal "narrow create label retains a destination tail and editor space"
              (groot-create-prompt-label "/repo/src" 22)
@@ -169,23 +176,23 @@
 (define wide-emoji-label
   (groot-create-prompt-label "/repo/😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀/tail" 80))
 (check-equal "narrow ellipsis label fits Helix byte budget and leaves input"
-             (list (groot-create-prompt-host-byte-width narrow-emoji-label)
-                   (groot-create-prompt-cell-width narrow-emoji-label)
-                   (groot-create-prompt-remaining-input 22 narrow-emoji-label))
+             (list (groot-prompt-host-byte-width narrow-emoji-label)
+                   (groot-prompt-cell-width narrow-emoji-label)
+                   (groot-prompt-remaining-input 22 narrow-emoji-label))
              '(12 11 8))
 (check-equal "wide emoji ellipsis preserves the destination tail"
              wide-emoji-label
              "Create in …😀😀😀😀😀😀😀😀😀😀😀😀/tail:")
 (check-equal "wide emoji ellipsis fits byte and display budgets and leaves input"
-             (list (<= (groot-create-prompt-host-byte-width wide-emoji-label)
-                       (groot-create-prompt-label-budget 80))
-                   (<= (groot-create-prompt-cell-width wide-emoji-label)
-                       (groot-create-prompt-label-budget 80))
-                   (groot-create-prompt-remaining-input 80 wide-emoji-label))
+             (list (<= (groot-prompt-host-byte-width wide-emoji-label)
+                       (groot-prompt-filename-label-budget 80))
+                   (<= (groot-prompt-cell-width wide-emoji-label)
+                       (groot-prompt-filename-label-budget 80))
+                   (groot-prompt-remaining-input 80 wide-emoji-label))
              '(#t #t 11))
 (check-equal "ellipsis host byte width is distinct from its display width"
-             (list (groot-create-prompt-host-byte-width "…")
-                   (groot-create-prompt-cell-width "…"))
+             (list (groot-prompt-host-byte-width "…")
+                   (groot-prompt-cell-width "…"))
              '(3 2))
 
 ;; Delete labels retain the permanent-deletion warning and the entry kind's
@@ -200,7 +207,7 @@
 (check-equal "Unicode delete label preserves its target tail and confirmation input"
              (let ([label (groot-delete-prompt-label "資料😀" 'file 80)])
                (list label
-                     (groot-create-prompt-remaining-input 80 label)))
+                     (groot-prompt-remaining-input 80 label)))
              '("Permanently delete 資料😀? Type yes:" 38))
 (check-equal "narrow delete labels preserve kind warnings, Unicode tails, and usable input"
              (list (groot-delete-prompt-label "very-long-file-name" 'file 40)
@@ -234,17 +241,4 @@
 ;; Rendering truncation preserves the requested width.
 (check-equal "row truncation reserves ellipsis" (groot-truncate "abcdef" 4) "abc…")
 
-;; Incremental search may narrow only when the next query extends the previous query.
-(check-equal "extended query narrows candidates"
-             (groot-filter-prefix-candidates "a" "ab" '("a" "b") '("a")) '("a"))
-(check-equal "backspace restores full candidate source"
-             (groot-filter-prefix-candidates "ab" "a" '("a" "b") '("a")) '("a" "b"))
-(check-equal "first search character starts from all files"
-             (groot-filter-prefix-candidates "" "a" '("a" "b") '()) '("a" "b"))
-
-;; Normal-mode character navigation mirrors the documented Helix bindings.
-(check-equal "j moves down one row" (groot-navigation-delta #\j) 1)
-(check-equal "k moves up one row" (groot-navigation-delta #\k) -1)
-(check-equal "other characters are not movement" (groot-navigation-delta #\x) #f)
-
-(displayln "groot core tests passed")
+(displayln "groot core tests finished")

@@ -4,20 +4,26 @@
 
 ## Design
 
-- `groot-core.scm` contains pure, documented data and viewport logic.
+- `groot-core.scm` defines entries, rows, and the typed session state.
+- `groot-path.scm` is lexical path algebra, including Windows drive and case rules.
+- `groot-prompt.scm` builds native prompt labels that fit Helix's cell and byte limits.
+- `groot-view.scm` is viewport, jump-label, and text-fitting arithmetic.
 - `groot-fs.scm` owns filesystem access, classifies each directory entry once, and
   shells out to an external finder for the search index.
-- `groot-integration.scm` orchestrates dependency-injected lifecycle and mouse effects.
-- `groot.scm` is the Helix UI and event adapter.
-- `tests/` runs without Helix and covers core state, finder arguments, initial
-  search, navigation, focus, redraw, mouse routing, and component lifecycle:
+- `groot-tree.scm` is the tree and navigation model: cached listings, visible rows,
+  expansion, reveal, and cursor movement.
+- `groot-search.scm` is the search model: the deferred index, grouped result rows,
+  and query editing.
+- `groot-integration.scm` holds the host-injected effect seams and the key dispatch table.
+- `groot.scm` is the Helix adapter: component lifecycle, rendering, events, and hooks.
+- `tests/` runs without Helix and covers every module above except the adapter:
   `steel tests/run.scm`.
 
 Rows carry a precomputed tree-guide prefix (`├╴`, `└╴`, `│`) instead of a fold marker.
 
 Entries, rendered rows, and session concerns use named structures. Tree, search,
-navigation, and lifecycle state are kept separate while the Helix adapter exposes
-one small compatibility boundary for state access.
+navigation, and lifecycle state are kept in separate structs, reached through
+generated `groot-state-<field>` accessors.
 
 Symlink directories are intentionally rendered as leaves, directory listings are loaded only when needed, and the recursive file index is deferred until the first search.
 

@@ -3,13 +3,10 @@
 
 (require "../groot-fs.scm")
 (require "../groot-core.scm")
+(require "../groot-path.scm")
 (require-builtin steel/process)
 (require "fs-fixtures.scm")
-
-;; Fails the Steel process with an actionable assertion message.
-(define (check-equal name actual expected)
-  (unless (equal? actual expected)
-    (error (string-append name "\n expected: " (to-string expected) "\n actual: " (to-string actual)))))
+(require "harness.scm")
 
 (define ignored '(".git" "node_modules"))
 
@@ -38,17 +35,10 @@
                (> (length (filter (lambda (p) (string-contains? p "groot-fs.scm")) found)) 0)
                #t))
 
-(define (check-true name value)
-  (check-equal name value #t))
-
 (define (check-result-detail name result fragment)
   (check-true name
               (and (string? (GrootFsDeleteResult-detail result))
                    (string-contains? (GrootFsDeleteResult-detail result) fragment))))
-
-(define (raises? thunk)
-  (with-handler (lambda (_) #t)
-    (begin (thunk) #f)))
 
 ;; Filesystem roots are valid create destinations even though they have no
 ;; directory-entry basename to enumerate.
@@ -77,15 +67,23 @@
                      operations)
                (list 'success child (list (list 'file child)))))
 
-(with-fs-fixture
- (lambda (parent)
-   (define spaced-unicode " a file 名 ")
-   (define created (groot-fs-create-empty-file parent spaced-unicode))
-   (check-equal "valid spaces and Unicode are preserved in the returned path"
-                created (fs-fixture-path parent spaced-unicode))
-   (check-equal "valid name creates an empty regular file"
-                (fs-fixture-entry-kind parent spaced-unicode) 'file)
-   (check-equal "new file is empty" (fs-fixture-file-contents created) "")))
+;; Creates one submitted path inside parent through the production boundary.
+(define (create-in parent submitted)
+  (groot-fs-create-entry (groot-fs-capture-create-context parent) submitted))
+(define (created-path result)
+  (and (equal? (GrootFsCreateResult-outcome result) 'success) (GrootFsCreateResult-path result)))
+
+;; Leading and trailing spaces are valid POSIX names; Windows rejects a trailing space.
+(when (not (equal? (path-separator) "\\"))
+  (with-fs-fixture
+   (lambda (parent)
+     (define spaced-unicode " a file 名 ")
+     (define created (created-path (create-in parent spaced-unicode)))
+     (check-equal "valid spaces and Unicode are preserved in the returned path"
+                  created (fs-fixture-path parent spaced-unicode))
+     (check-equal "valid name creates an empty regular file"
+                  (fs-fixture-entry-kind parent spaced-unicode) 'file)
+     (check-equal "new file is empty" (fs-fixture-file-contents created) ""))))
 
 ;; Colons are single-entry POSIX filename characters, not path syntax.
 (when (not (equal? (path-separator) "\\"))
@@ -93,7 +91,7 @@
    (lambda (parent)
      (define name "colon:name")
      (check-equal "POSIX colon name is created unchanged"
-                  (groot-fs-create-empty-file parent name)
+                  (created-path (create-in parent name))
                   (fs-fixture-path parent name))
      (check-equal "POSIX colon name creates a file"
                   (fs-fixture-entry-kind parent name) 'file))))
@@ -103,14 +101,10 @@
  (lambda (parent)
    (for-each
     (lambda (name)
-      (check-true (string-append "invalid single-entry name is rejected: " (to-string name))
-                  (raises? (lambda () (groot-fs-create-empty-file parent name))))
+      (check-equal (string-append "invalid name is rejected: " (to-string name))
+                   (GrootFsCreateResult-outcome (create-in parent name)) 'rejected)
       (check-true "invalid input does not modify its parent" (fs-fixture-empty? parent)))
-    (append (list "" "." ".." (string-append "nul" "\0" "name"))
-            (map (lambda (separator) (string-append "nested" separator "name"))
-                 (if (equal? (path-separator) "\\")
-                     (list "\\" "/")
-                     (list (path-separator))))))))
+    (list "" "." ".." (string-append "nul" "\0" "name")))))
 
 (with-fs-fixture
  (lambda (parent)
@@ -126,8 +120,8 @@
    (fs-fixture-symlink! sentinel link)
    (for-each
     (lambda (name)
-      (check-true (string-append "existing entry is not overwritten: " name)
-                  (raises? (lambda () (groot-fs-create-empty-file parent name)))))
+      (check-equal (string-append "existing entry is not overwritten: " name)
+                   (GrootFsCreateResult-outcome (create-in parent name)) 'rejected))
     '("existing-file" "existing-directory" "existing-link"))
    (check-equal "file collision preserves sentinel contents"
                 (fs-fixture-file-contents file) "do not replace")
@@ -146,8 +140,8 @@
 (with-fs-fixture
  (lambda (parent)
    (define missing-parent (fs-fixture-path parent "missing-parent"))
-   (check-true "missing parents are not created"
-               (raises? (lambda () (groot-fs-create-empty-file missing-parent "child"))))
+   (check-raises "a missing parent cannot be captured as a create destination"
+                 (lambda () (groot-fs-capture-create-context missing-parent)))
    (check-equal "missing parent remains absent" (fs-fixture-entry-kind parent "missing-parent") #f)))
 
 ;; Nested create accepts one leading slash relative to the captured destination,
@@ -961,5 +955,5 @@
                 (fs-fixture-file-contents source) "must remain after injected failure")))
 
 (displayln (if found
-               (string-append "groot fs tests passed (finder found " (to-string (length found)) " files)")
-               "groot fs tests passed (no external finder; fallback path in use)"))
+               (string-append "groot fs tests finished (finder found " (to-string (length found)) " files)")
+               "groot fs tests finished (no external finder; fallback path in use)"))
